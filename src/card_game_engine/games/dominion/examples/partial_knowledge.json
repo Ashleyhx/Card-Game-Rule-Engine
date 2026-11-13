@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "description": "Planner: Gold known on top, 3 known and 2 unknown cards below; values that reach '?' cards are lower bounds.",
+  "num_players": 2,
+  "turn_number": 10,
+  "kingdom": [
+    "Cellar",
+    "Market",
+    "Merchant",
+    "Militia",
+    "Mine",
+    "Moat",
+    "Remodel",
+    "Smithy",
+    "Village",
+    "Workshop"
+  ],
+  "supply": {
+    "Copper": 46,
+    "Silver": 38,
+    "Gold": 29,
+    "Estate": 8,
+    "Duchy": 8,
+    "Province": 8,
+    "Curse": 10,
+    "Cellar": 10,
+    "Market": 10,
+    "Merchant": 10,
+    "Militia": 9,
+    "Mine": 10,
+    "Moat": 10,
+    "Remodel": 10,
+    "Smithy": 9,
+    "Village": 10,
+    "Workshop": 10
+  },
+  "player": {
+    "phase": "action",
+    "hand": [
+      "Smithy",
+      "Militia",
+      "Copper",
+      "Copper",
+      "Silver"
+    ],
+    "draw_pile": {
+      "top": [
+        "Gold"
+      ],
+      "composition": {
+        "Copper": 2,
+        "Estate": 1
+      },
+      "unknown_count": 2
+    },
+    "discard_pile": {
+      "composition": {
+        "Copper": 2
+      },
+      "unknown_count": 1
+    }
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 6
+    }
+  ]
+}

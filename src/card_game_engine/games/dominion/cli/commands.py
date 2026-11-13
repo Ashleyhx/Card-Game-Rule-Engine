@@ -8,10 +8,11 @@ import sys
 from importlib import resources
 from pathlib import Path
 
+from ..planning import PlanConfig, compare_actions, get_objective, plan_next_action
 from ..policy import HeuristicPolicy
 from ..rules import DominionRuleEngine, SnapshotError, action_to_dict, has_errors, state_from_dict, validate_state
 from .interactive import interactive_main
-from .render import render_advice, render_issues, render_state
+from .render import render_advice, render_comparison, render_issues, render_plan, render_state
 
 EXIT_OK, EXIT_INVALID, EXIT_USAGE = 0, 1, 2
 
@@ -70,6 +71,67 @@ def cmd_recommend(args, engine) -> int:
         if warn:
             print(render_issues(warn))
         print(render_advice(advice, state, engine, top=args.top, verbose=not args.brief))
+    return EXIT_OK
+
+
+def _plan_config(args) -> PlanConfig:
+    return PlanConfig(objective=args.objective, horizon=args.horizon, max_depth=args.depth, max_nodes=args.nodes,
+                      samples_per_chance=args.samples, seed=args.seed, top_outcomes=args.top)
+
+
+def _parse_plan_state(args, engine):
+    """Like ``_parse_state`` but accepts ``--state PATH`` as an alias of STATE; None if the snapshot is invalid."""
+    if args.state_path:
+        if args.state and args.state != args.state_path:
+            raise ValueError("Give the snapshot either as STATE or as --state PATH, not both.")
+        args.state = args.state_path
+    state, issues = _parse_state(args, engine)
+    if has_errors(issues):
+        _emit({"valid": False, "issues": [i.to_dict() for i in issues]}, args.json,
+              "Snapshot is not consistent with the rules:\n" + render_issues(issues))
+        return None, issues
+    if not args.json:
+        warn = [i for i in issues if i.severity == "warning"]
+        if warn:
+            print(render_issues(warn))
+    return state, issues
+
+
+def cmd_plan(args, engine) -> int:
+    cfg = _plan_config(args)
+    state, issues = _parse_plan_state(args, engine)
+    if state is None:
+        return EXIT_INVALID
+    result = plan_next_action(state, cfg, engine)
+    _emit(result.to_dict(), args.json, render_plan(result, state, engine, cfg))
+    return EXIT_OK
+
+
+def _match_actions(labels: list[str], legal) -> list:
+    """Legal actions whose label (``describe()``) matches each given label, case-insensitively."""
+    by_label = {a.describe().casefold(): a for a in legal}
+    unknown = [lb for lb in labels if lb.strip().casefold() not in by_label]
+    if unknown:
+        raise ValueError(f"No legal action labelled {', '.join(repr(u) for u in unknown)}. Legal actions: "
+                         + (", ".join(repr(a.describe()) for a in legal) or "(none)"))
+    return [by_label[lb.strip().casefold()] for lb in labels]
+
+
+def cmd_compare(args, engine) -> int:
+    cfg = _plan_config(args)
+    state, issues = _parse_plan_state(args, engine)
+    if state is None:
+        return EXIT_INVALID
+    legal = engine.legal_actions(state)
+    # Without --actions this is evaluate_action_sequences(state): every legal first action, no root pruning.
+    candidates = _match_actions(args.actions, legal) if args.actions else list(legal)
+    result = compare_actions(state, candidates, cfg, engine)
+    description = get_objective(cfg.objective, state, engine).describe()
+    text = render_comparison(result, state, engine, cfg, description)
+    blocking = engine.blocking_issues(state)
+    if blocking:
+        text += "\nBlocked until you resolve:\n" + "\n".join(f"  - {b}" for b in blocking)
+    _emit(result.to_dict(), args.json, text)
     return EXIT_OK
 
 
@@ -214,3 +276,28 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     i.add_argument("--load", help="Start from an existing snapshot JSON instead of answering questions")
     i.add_argument("--save", help="Save the snapshot to this path")
     i.set_defaults(func=_run(cmd_interactive))
+
+    def add_plan_args(sp):
+        add_state_args(sp)
+        sp.add_argument("--state", dest="state_path", metavar="PATH", help="Snapshot JSON file (alias of STATE)")
+        sp.add_argument("--objective", default="money",
+                        help="money (default) | purchase | threshold:N | next_hand_money")
+        sp.add_argument("--horizon", choices=("turn", "next_hand"),
+                        help="Plan to the end of the turn or until the next hand is drawn "
+                             "(default: snapshot's planning.horizon, else turn)")
+        sp.add_argument("--depth", type=int, default=8, help="Max decision steps (default 8)")
+        sp.add_argument("--nodes", type=int, default=20000, help="Node budget (default 20000)")
+        sp.add_argument("--samples", type=int, default=32,
+                        help="Monte Carlo samples per chance node that is too large to enumerate (default 32)")
+        sp.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default 0)")
+        sp.add_argument("--top", type=int, default=5, help="How many outcomes / alternatives to show (default 5)")
+
+    p = sub.add_parser("plan", help="Recommend the next action by probabilistic lookahead (exact draw odds)")
+    add_plan_args(p)
+    p.set_defaults(func=_run(cmd_plan))
+
+    cmp_ = sub.add_parser("compare", help="Evaluate legal first actions side by side with the lookahead planner")
+    add_plan_args(cmp_)
+    cmp_.add_argument("--actions", nargs="+", metavar="LABEL",
+                      help='Only these actions, by label (case-insensitive), e.g. --actions "Play Village" "Play Smithy"')
+    cmp_.set_defaults(func=_run(cmd_compare))

@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "description": "Planner (next_hand horizon): thin deck, 2 cards left to draw, so the next hand reshuffles a known discard pile; Gold now is in it.",
+  "num_players": 2,
+  "turn_number": 9,
+  "kingdom": [
+    "Cellar",
+    "Chapel",
+    "Village",
+    "Smithy",
+    "Throne Room",
+    "Moneylender",
+    "Festival",
+    "Laboratory",
+    "Market",
+    "Witch"
+  ],
+  "supply": {
+    "Copper": 46,
+    "Silver": 38,
+    "Gold": 30,
+    "Estate": 8,
+    "Duchy": 8,
+    "Province": 8,
+    "Curse": 10,
+    "Cellar": 10,
+    "Chapel": 9,
+    "Village": 10,
+    "Smithy": 10,
+    "Throne Room": 10,
+    "Moneylender": 10,
+    "Festival": 10,
+    "Laboratory": 10,
+    "Market": 10,
+    "Witch": 10
+  },
+  "trash": [
+    "Copper",
+    "Copper",
+    "Copper",
+    "Copper",
+    "Estate",
+    "Chapel"
+  ],
+  "player": {
+    "phase": "buy",
+    "hand": [],
+    "in_play": [
+      "Silver",
+      "Silver",
+      "Copper",
+      "Copper"
+    ],
+    "coins": 6,
+    "owned_cards": {
+      "Copper": 3,
+      "Silver": 2,
+      "Estate": 2
+    },
+    "draw_pile": {
+      "composition": {
+        "Estate": 2
+      }
+    },
+    "discard_pile": {
+      "composition": {
+        "Copper": 1
+      }
+    }
+  },
+  "planning": {
+    "horizon": "next_hand"
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 5
+    }
+  ]
+}

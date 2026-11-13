@@ -19,6 +19,7 @@ from .actions import Action, Buy, EndActionPhase, EndTurn, PlayAction, PlayAllTr
 from .cards import CardDef, CardRegistry, UnknownCardError, load_registry
 from .ruleset import Ruleset, load_ruleset
 from .state import GameState, Phase
+from .zones import add_to_discard, put_on_top
 
 __all__ = ["DominionRuleEngine", "GameEndStatus", "IllegalActionError", "Transition"]
 
@@ -202,6 +203,10 @@ class DominionRuleEngine:
                 raise ValueError(f"You drew {len(canon)} cards but only {t.pending_draws} draw(s) are pending.")
             t.hand = sorted(t.hand + canon)
             t.pending_draws = 0  # fewer cards = deck and discard ran out
+            if canon and (s.draw_pile is not None or s.discard_pile is not None):
+                # Which pile the cards came from (and whether a reshuffle happened) isn't observable
+                # here, so known zone contents can no longer be trusted: drop them rather than guess.
+                s.draw_pile = s.discard_pile = None
         if hand is not None:
             t.hand = sorted(self.registry.resolve(c) for c in hand)
             t.pending_draws = 0
@@ -333,10 +338,16 @@ class DominionRuleEngine:
             if s.supply.get(g.card, 0) > 0:
                 s.supply[g.card] -= 1
                 self._owned_add(s, g.card)
-                if g.destination == "deck" and s.deck_count is not None:
-                    s.deck_count += 1
-                elif g.destination == "discard" and s.discard_count is not None:
-                    s.discard_count += 1
+                if g.destination == "deck":
+                    if s.deck_count is not None:
+                        s.deck_count += 1
+                    if s.draw_pile is not None:
+                        s.draw_pile = put_on_top(s.draw_pile, [g.card])
+                elif g.destination == "discard":
+                    if s.discard_count is not None:
+                        s.discard_count += 1
+                    if s.discard_pile is not None:
+                        s.discard_pile = add_to_discard(s.discard_pile, [g.card])
                 notes.append(f"{label}: gained a {g.card} ({'onto your deck' if g.destination == 'deck' else 'to your discard pile'}).")
             else:
                 notes.append(f"{label}: no {g.card} left in the Supply, so nothing is gained.")
@@ -402,6 +413,8 @@ class DominionRuleEngine:
         self._owned_add(s, cdef.name)
         if s.discard_count is not None:
             s.discard_count += 1
+        if s.discard_pile is not None:
+            s.discard_pile = add_to_discard(s.discard_pile, [cdef.name])
         notes.append(f"Bought {cdef.name} for ${cdef.cost} (${t.coins} and {t.buys} Buy(s) left).")
         if s.supply[cdef.name] == 0:
             notes.append(f"The {cdef.name} pile is now empty.")
@@ -411,6 +424,8 @@ class DominionRuleEngine:
         discarded = len(t.hand) + len(t.in_play)
         if s.discard_count is not None:
             s.discard_count += discarded
+        if s.discard_pile is not None:
+            s.discard_pile = add_to_discard(s.discard_pile, t.hand + t.in_play)
         t.hand = []
         t.in_play = []
         t.actions = t.buys = t.coins = 0

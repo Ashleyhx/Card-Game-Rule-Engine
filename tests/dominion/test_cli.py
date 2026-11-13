@@ -259,4 +259,120 @@ def test_runtime_is_fully_offline(monkeypatch, capsys):
     monkeypatch.setattr(socket, "create_connection", _no_network)
     for name in example_names():
         assert cardgame_main(["dominion", "recommend", "-e", name, "--json"]) == 0
+        assert cardgame_main(["dominion", "plan", "-e", name, "--json", "--nodes", "3000"]) == 0
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------- lookahead planner: plan / compare
+
+def test_plan_human_output_has_every_section(capsys):
+    code, out, _ = run(capsys, "plan", "-e", "stranded_draw_vs_money")
+    assert code == 0
+    assert ">> RECOMMENDED: Play Militia" in out and "E[$] = 5.00" in out
+    assert "Play Smithy" in out and "E[$] = 3.00" in out  # alternative
+    for section in ("Method: exact enumeration", "Information level: known_composition", "Threshold probabilities:",
+                    "Top future outcomes", "Principal line: Play Militia", "Why:", "Search:", "nodes expanded",
+                    "budget exhausted: no", "Limitations:"):
+        assert section in out, section
+
+
+def test_plan_json_is_the_result_dict(capsys, tmp_path):
+    code, out, _ = run(capsys, "plan", "-e", "stranded_draw_vs_money", "--json", "--seed", "7", "--depth", "6",
+                       "--nodes", "5000", "--samples", "8", "--top", "2")
+    data = json.loads(out)
+    assert code == 0 and data["recommended"]["action_key"] == "Play Militia"
+    assert data["config"] == {"objective": "money", "horizon": None, "max_depth": 6, "max_nodes": 5000,
+                              "max_outcomes_per_chance": 200, "samples_per_chance": 8, "seed": 7, "top_outcomes": 2}
+    # --state PATH is an alias of the positional STATE
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps(load_example("stranded_draw_vs_money")))
+    code, out2, _ = run(capsys, "plan", "--state", str(f), "--json", "--seed", "7", "--depth", "6",
+                        "--nodes", "5000", "--samples", "8", "--top", "2")
+    assert code == 0 and json.loads(out2) == data
+
+
+def test_plan_lower_bounds_and_objectives(capsys):
+    code, out, _ = run(capsys, "plan", "-e", "partial_knowledge")
+    assert code == 0 and "E[$] >= 7.80" in out and "P($>=5) >= " in out and "partially_known" in out
+    code, out, _ = run(capsys, "plan", "-e", "reshuffle_next_hand", "--horizon", "next_hand",
+                       "--objective", "next_hand_money", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["horizon"] == "next_hand" and data["objective"] == "next_hand_money"
+    assert data["recommended"]["action_key"] == "Buy Gold"
+    assert data["recommended"]["expected_value"] == pytest.approx(5.0)  # 3 cards from {Copper 3, Silver 2, Gold}
+    code, out, _ = run(capsys, "plan", "-e", "small_deck_village_smithy", "--objective", "threshold:6")
+    assert code == 0 and "P($>=6)" in out
+
+
+def test_plan_monte_carlo_shows_stderr(capsys, tmp_path):
+    # 17 different single cards in the draw pile: Smithy has C(17,3) = 680 > 200 outcomes -> sampled.
+    snap = load_example("small_deck_village_smithy")
+    kingdom = snap["kingdom"]
+    snap["player"]["hand"] = ["Smithy", "Copper"]
+    snap["player"].pop("owned_cards")
+    snap["player"]["draw_pile"] = {"composition": {c: 1 for c in kingdom + ["Copper", "Silver", "Gold", "Estate",
+                                                                            "Duchy", "Province", "Curse"]}}
+    f = tmp_path / "mc.json"
+    f.write_text(json.dumps(snap))
+    code, out, _ = run(capsys, "plan", str(f), "--samples", "8", "--depth", "3")
+    assert code == 0 and "Monte Carlo" in out and "±" in out
+
+
+def test_compare_every_legal_action_and_selected(capsys):
+    code, out, _ = run(capsys, "compare", "-e", "small_deck_village_smithy")
+    assert code == 0 and "Side by side" in out
+    for label, value in (("Play Village", "5.20"), ("Play Smithy", "4.40"), ("End Action phase", "2.00")):
+        assert label in out and value in out
+    code, out, _ = run(capsys, "compare", "-e", "small_deck_village_smithy", "--json",
+                       "--actions", "play smithy", "PLAY VILLAGE")
+    data = json.loads(out)
+    assert code == 0 and [c["action_key"] for c in data["candidates"]] == ["Play Village", "Play Smithy"]
+    assert data["candidates"][0]["expected_value"] == pytest.approx(26 / 5)
+
+
+def test_compare_unknown_label_lists_legal_actions(capsys):
+    code, _, err = run(capsys, "compare", "-e", "small_deck_village_smithy", "--actions", "Play Gold")
+    assert code == 2 and "Play Gold" in err and "'Play Village'" in err and "'Play Smithy'" in err
+
+
+def test_plan_errors_reuse_exit_codes(tmp_path, capsys):
+    code, _, err = run(capsys, "plan", "-e", "opening_5_2", "--objective", "greed")
+    assert code == 2 and "Unknown objective" in err
+    code, _, err = run(capsys, "plan", "-e", "opening_5_2", "--nodes", "0")
+    assert code == 2 and "max_nodes" in err
+    code, _, err = run(capsys, "plan")
+    assert code == 2 and "--example" in err
+    snap = {"num_players": 2, "kingdom": ["Cellar", "Market", "Merchant", "Militia", "Mine", "Moat",
+                                          "Remodel", "Smithy", "Village", "Workshop"],
+            "player": {"phase": "action", "hand": [], "in_play": ["Gold"]}}
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps(snap))
+    code, out, _ = run(capsys, "compare", str(f))
+    assert code == 1 and "Treasures are in play" in out
+    code, out, _ = run(capsys, "plan", str(f), "--json")
+    assert code == 1 and json.loads(out)["valid"] is False
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"num_players": 9, "kingdom": [], "player": {}}))
+    code, _, err = run(capsys, "plan", str(bad))
+    assert code == 1 and "num_players" in err
+
+
+@pytest.mark.parametrize("name", example_names())
+def test_plan_every_example(capsys, name):
+    code, out, _ = run(capsys, "plan", "-e", name, "--json", "--nodes", "3000")
+    assert code == 0
+    json.loads(out)
+
+
+def test_python_m_entry_point_runs_plan():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = str(Path(__file__).resolve().parents[2] / "src")
+    env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    proc = subprocess.run([sys.executable, "-m", "card_game_engine", "dominion", "plan", "-e",
+                           "stranded_draw_vs_money", "--json"], capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["recommended"]["action_key"] == "Play Militia"

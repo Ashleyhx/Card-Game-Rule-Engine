@@ -16,8 +16,10 @@ from typing import Any
 
 from .cards import CardRegistry, UnknownCardError, load_registry
 from .ruleset import Ruleset, load_ruleset
+from .zones import DiscardKnowledge, DrawPileKnowledge
 
 SCHEMA_VERSION = 1
+PLANNING_HORIZONS = ("turn", "next_hand")
 
 
 class Phase(str, Enum):
@@ -71,6 +73,9 @@ class GameState:
     opponents: list[OpponentInfo] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)  # one {"turn", "hand", "bought"} per finished turn
     assumptions: list[str] = field(default_factory=list)
+    draw_pile: DrawPileKnowledge | None = None
+    discard_pile: DiscardKnowledge | None = None
+    planning_horizon: str | None = None  # "turn" | "next_hand"
 
     def copy(self) -> "GameState":
         return copy.deepcopy(self)
@@ -110,6 +115,12 @@ class GameState:
             ],
             "history": [dict(h) for h in self.history],
         }
+        if self.draw_pile is not None:
+            out["player"]["draw_pile"] = self.draw_pile.to_snapshot()
+        if self.discard_pile is not None:
+            out["player"]["discard_pile"] = self.discard_pile.to_snapshot()
+        if self.planning_horizon is not None:
+            out["planning"] = {"horizon": self.planning_horizon}
         return out
 
 
@@ -163,6 +174,78 @@ def _int_field(data: dict, key: str, default: int | None, errors: list[str], whe
         errors.append(f"{where}.{key}: must be >= {minimum}.")
         return default
     return v
+
+
+def _card_list(value: Any, registry: CardRegistry, where: str, errors: list[str]) -> tuple[str, ...]:
+    """An ordered list of card names (order matters, so no ``{name: count}`` form)."""
+    if not isinstance(value, list):
+        errors.append(f"{where}: expected a list of card names, top card first.")
+        return ()
+    out: list[str] = []
+    for name in value:
+        if not isinstance(name, str):
+            errors.append(f"{where}: card names must be strings (got {name!r}).")
+            continue
+        try:
+            out.append(registry.resolve(name))
+        except UnknownCardError as e:
+            errors.append(f"{where}: {e}")
+    return tuple(out)
+
+
+def _check_keys(raw: dict, allowed: tuple[str, ...], where: str, errors: list[str]) -> bool:
+    unknown = sorted(set(raw) - set(allowed))
+    if unknown:
+        errors.append(f"{where}: unknown key(s) {', '.join(unknown)} (allowed: {', '.join(allowed)}).")
+    return not unknown
+
+
+def _parse_draw_pile(raw: Any, registry: CardRegistry, errors: list[str]) -> DrawPileKnowledge | None:
+    where = "player.draw_pile"
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        errors.append(f"{where}: expected an object with 'order', or 'top'/'composition'/'unknown_count'.")
+        return None
+    if not _check_keys(raw, ("order", "top", "composition", "unknown_count"), where, errors):
+        return None
+    if "order" in raw:
+        if len(raw) > 1:
+            errors.append(f"{where}: 'order' (fully known order) cannot be combined with other keys.")
+            return None
+        return DrawPileKnowledge(top=_card_list(raw["order"], registry, f"{where}.order", errors))
+    top = _card_list(raw.get("top", []), registry, f"{where}.top", errors)
+    rest = parse_card_counts(raw.get("composition"), registry, f"{where}.composition", errors)
+    unknown = _int_field(raw, "unknown_count", 0, errors, where)
+    return DrawPileKnowledge(top=top, rest=rest, unknown=unknown)
+
+
+def _parse_discard_pile(raw: Any, registry: CardRegistry, errors: list[str]) -> DiscardKnowledge | None:
+    where = "player.discard_pile"
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        errors.append(f"{where}: expected an object with 'composition' and optional 'unknown_count'.")
+        return None
+    if not _check_keys(raw, ("composition", "unknown_count"), where, errors):
+        return None
+    cards = parse_card_counts(raw.get("composition"), registry, f"{where}.composition", errors)
+    return DiscardKnowledge(cards=cards, unknown=_int_field(raw, "unknown_count", 0, errors, where))
+
+
+def _parse_planning(raw: Any, errors: list[str]) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        errors.append('planning: expected an object such as {"horizon": "turn"}.')
+        return None
+    if not _check_keys(raw, ("horizon",), "planning", errors):
+        return None
+    horizon = raw.get("horizon")
+    if horizon is not None and horizon not in PLANNING_HORIZONS:
+        errors.append(f"planning.horizon: must be one of {', '.join(PLANNING_HORIZONS)} (got {horizon!r}).")
+        return None
+    return horizon
 
 
 def state_from_dict(
@@ -298,6 +381,9 @@ def state_from_dict(
 
     deck_count = _int_field(p, "deck_count", None, errors, "player")
     discard_count = _int_field(p, "discard_count", None, errors, "player")
+    draw_pile = _parse_draw_pile(p.get("draw_pile"), registry, errors)
+    discard_pile = _parse_discard_pile(p.get("discard_pile"), registry, errors)
+    planning_horizon = _parse_planning(data.get("planning"), errors)
 
     opponents: list[OpponentInfo] = []
     opp_raw = data.get("opponents", [])
@@ -365,6 +451,9 @@ def state_from_dict(
         opponents=opponents,
         history=history,
         assumptions=assumptions,
+        draw_pile=draw_pile,
+        discard_pile=discard_pile,
+        planning_horizon=planning_horizon,
     )
 
 

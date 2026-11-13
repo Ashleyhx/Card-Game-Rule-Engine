@@ -36,6 +36,10 @@ def validate_state(state: GameState, engine: DominionRuleEngine | None = None) -
         for c in sorted(set(cards)):
             if c not in allowed:
                 issues.append(Issue("error", f"{c} (in {label}) is not part of this game's Supply."))
+    zones = _known_zone_cards(state)
+    for c in sorted(zones):
+        if c not in allowed:
+            issues.append(Issue("error", f"{c} (in draw/discard pile) is not part of this game's Supply."))
     if state.owned_cards:
         for c in sorted(state.owned_cards):
             if c not in allowed:
@@ -50,6 +54,8 @@ def validate_state(state: GameState, engine: DominionRuleEngine | None = None) -
                     "error",
                     f"owned_cards lists {state.owned_cards.get(c, 0)} {c} but {n} are in your hand/play area.",
                 ))
+
+    issues.extend(_zone_issues(state, zones))
 
     # Phase consistency
     treasures_in_play = [c for c in t.in_play if reg.get(c).is_treasure]
@@ -90,6 +96,36 @@ def validate_state(state: GameState, engine: DominionRuleEngine | None = None) -
 
     for a in state.assumptions:
         issues.append(Issue("info", "Assumption: " + a))
+    return issues
+
+
+def _known_zone_cards(state: GameState) -> Counter:
+    known: Counter = Counter()
+    if state.draw_pile is not None:
+        known += Counter(state.draw_pile.top) + state.draw_pile.rest_counter
+    if state.discard_pile is not None:
+        known += state.discard_pile.counter
+    return known
+
+
+def _zone_issues(state: GameState, zones: Counter) -> list[Issue]:
+    """Given draw/discard piles must match deck/discard counts and fit inside owned_cards."""
+    issues: list[Issue] = []
+    for label, zone, count, key in (
+        ("draw_pile", state.draw_pile, state.deck_count, "deck_count"),
+        ("discard_pile", state.discard_pile, state.discard_count, "discard_count"),
+    ):
+        if zone is not None and count is not None and zone.size != count:
+            issues.append(Issue("error", f"{label} holds {zone.size} card(s) but {key} is {count}."))
+    if state.owned_cards is not None and zones:
+        visible = Counter(state.turn.hand) + Counter(state.turn.in_play)
+        for c, n in sorted((visible + zones).items()):
+            owned = state.owned_cards.get(c, 0)
+            if visible[c] <= owned < n:  # hand/play overflow is reported separately above
+                issues.append(Issue(
+                    "error",
+                    f"owned_cards lists {owned} {c} but {n} are in your hand, play area and known draw/discard piles.",
+                ))
     return issues
 
 
