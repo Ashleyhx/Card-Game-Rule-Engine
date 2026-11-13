@@ -154,9 +154,6 @@ class DominionRuleEngine:
             reasons.append(f"{len(empty)} Supply piles are empty ({', '.join(empty)}).")
         return GameEndStatus(bool(reasons), tuple(reasons), empty)
 
-    def max_cost_affordable(self, state: GameState) -> int:
-        return state.turn.coins
-
     # ------------------------------------------------------------------
     # Transitions
     # ------------------------------------------------------------------
@@ -315,14 +312,12 @@ class DominionRuleEngine:
         if bonuses:
             notes.append(f"{label}: " + ", ".join(bonuses) + ".")
 
+        # Moneylender's trash choice is handled by the caller (part of PlayAction, or manual via Throne Room).
         special = cdef.special
         if special == "merchant":
             t.merchants_played += 1
             if t.silver_played:
                 notes.append(f"{label}: a Silver was already played this turn, so this Merchant gives no bonus.")
-        elif special == "moneylender":
-            # When played normally, the trash choice is part of the action; via Throne Room it is manual.
-            pass
         elif special == "poacher":
             n = len(s.empty_piles())
             if n:

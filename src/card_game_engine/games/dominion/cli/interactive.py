@@ -6,11 +6,14 @@ Input/output functions are injectable so the whole flow is testable.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Callable
 
 from ..policy import HeuristicPolicy
-from ..rules import GameState, Phase, DominionRuleEngine, SnapshotError, has_errors, state_from_dict, validate_state
+from ..rules import (
+    DominionRuleEngine, GameState, Phase, SnapshotError, TurnState, has_errors, state_from_dict, validate_state,
+)
 from .parsing import parse_card_list, parse_deltas, parse_pile_overrides
 from .render import fmt_cards, render_advice, render_issues
 
@@ -96,6 +99,11 @@ def build_snapshot(p: Prompter, engine: DominionRuleEngine) -> dict:
                 break
     p.say("  Kingdom: " + ", ".join(kingdom))
 
+    turn_number = p.ask_int("Your turn number (1 or 2 = quick start from the starting deck; blank if unknown)",
+                            None, minimum=1, optional=True)
+    if turn_number in (1, 2):
+        return _opening_snapshot(p, engine, n, kingdom, turn_number)
+
     supply = rules.starting_supply(kingdom, n, reg)
     if not p.ask_yes("Are all Supply piles still full (start of game)?", default=False):
         p.say("  Enter the piles that changed, e.g. 'Province=5, Silver=34, Smithy=7'.")
@@ -112,19 +120,19 @@ def build_snapshot(p: Prompter, engine: DominionRuleEngine) -> dict:
             except ValueError as e:
                 p.say(f"  {e}")
 
-    turn_number = p.ask_int("Your turn number (blank if unknown)", None, minimum=1, optional=True)
     phase = p.ask_choice("Phase", ["action", "buy"], "action")
     hand = p.ask_cards("Cards in your hand", reg)
-    in_play = p.ask_cards("Cards already in play this turn", reg, "none")
+    in_play = p.ask_cards("Cards already played this turn", reg, "none")
 
     player: dict = {"phase": phase, "hand": hand, "in_play": in_play}
-    if in_play or phase == "buy":
-        player["actions"] = p.ask_int("Actions remaining", 1 if not in_play else 0)
+    if in_play:
+        # Only cards already played produce Actions/Buys/coins; with nothing in play the turn-start values apply.
+        player["actions"] = p.ask_int("Actions remaining", 0)
         player["buys"] = p.ask_int("Buys remaining", 1)
         default_coins = sum(reg.get(c).treasure_value for c in in_play)
-        player["coins"] = p.ask_int("Coins ($) available now (Treasures already played + Action bonuses)", default_coins)
-        if phase == "buy":
-            player["bought_this_turn"] = p.ask_cards("Cards already bought this turn", reg, "none")
+        player["coins"] = p.ask_int("Coins ($) from cards already played (not Treasures still in hand)", default_coins)
+    if phase == "buy":
+        player["bought_this_turn"] = p.ask_cards("Cards already bought this turn", reg, "none")
 
     mode = p.ask_choice(
         "Your whole deck (for VP and deck-fit advice): skip, starting deck + changes, or full list?",
@@ -164,6 +172,37 @@ def build_snapshot(p: Prompter, engine: DominionRuleEngine) -> dict:
     }
 
 
+def _opening_snapshot(p: Prompter, engine: DominionRuleEngine, n: int, kingdom: list[str], turn_number: int) -> dict:
+    """Turns 1-2: you still hold the starting 7 Copper + 3 Estate, so only the Copper/Estate split is needed."""
+    reg, rules = engine.registry, engine.ruleset
+    p.say("  Quick start: your deck is the starting 7 Copper + 3 Estate.")
+    bought_t1: list[str] = []
+    if turn_number == 2:
+        bought_t1 = p.ask_cards("What did you buy on turn 1? (blank = nothing)", reg, "none")
+    coppers = p.ask_int("How many Coppers are in your hand? (the rest are Estates)", None, minimum=0, maximum=5)
+    hand = ["Copper"] * coppers + ["Estate"] * (5 - coppers)
+
+    owned = dict(rules.starting_deck)
+    for c in bought_t1:
+        owned[c] = owned.get(c, 0) + 1
+    opponents = []
+    for i in range(n - 1):
+        vp = p.ask_int(f"Opponent {i + 1} VP (blank if unknown)", 3, minimum=-100, optional=True)
+        opponents.append({"name": f"Opponent {i + 1}", "vp": vp})
+    snapshot = {
+        "schema_version": 1,
+        "num_players": n,
+        "turn_number": turn_number,
+        "kingdom": kingdom,
+        # Supply omitted on purpose: the parser assumes full piles and reports that assumption.
+        "player": {"phase": "buy", "hand": hand, "owned_cards": owned},  # starting hands hold no Actions
+        "opponents": opponents,
+    }
+    if turn_number == 2:
+        snapshot["history"] = [{"turn": 1, "hand": [], "bought": bought_t1}]
+    return snapshot
+
+
 def _resolve_followups(p: Prompter, engine: DominionRuleEngine, state: GameState) -> GameState:
     reg = engine.registry
     t = state.turn
@@ -182,8 +221,13 @@ def _resolve_followups(p: Prompter, engine: DominionRuleEngine, state: GameState
         state = engine.resolve_pending(state, drawn=drawn, clear_unresolved=False)
     if state.turn.unresolved:
         p.say(f"  Current hand: {fmt_cards(state.turn.hand)}")
-        new_hand = p.ask("Your hand now, after resolving (blank = unchanged)", "")
-        hand = parse_card_list(new_hand, reg) if new_hand else None
+        while True:
+            new_hand = p.ask("Your hand now, after resolving (blank = unchanged)", "")
+            try:
+                hand = parse_card_list(new_hand, reg) if new_hand else None
+                break
+            except ValueError as e:
+                p.say(f"  {e}")
         state = engine.resolve_pending(state, hand=hand)
         while True:
             try:
@@ -208,9 +252,117 @@ def _resolve_followups(p: Prompter, engine: DominionRuleEngine, state: GameState
     return state
 
 
+def _next_turn_hand_default(state: GameState, rules) -> str:
+    """On turn 2 the hand is whatever the starting deck didn't give you on turn 1."""
+    last = state.history[-1] if state.history else None
+    if not (last and last["turn"] == 1 and len(last["hand"]) == 5):
+        return ""
+    rest = Counter(rules.starting_deck)
+    rest.subtract(last["hand"])
+    if any(v < 0 for v in rest.values()):
+        return ""
+    return fmt_cards([c for c, k in rest.items() for _ in range(k)])
+
+
+def _apply_gains(s: GameState, deltas: dict[str, int]) -> list[str]:
+    """Gains come out of the Supply; losses go to the trash. Returns notes about anything odd."""
+    notes = []
+    for card, d in deltas.items():
+        if d > 0:
+            if card not in s.supply:
+                notes.append(f"{card} is not in this game's Supply - ignored.")
+                continue
+            if s.supply[card] < d:
+                notes.append(f"Only {s.supply[card]} {card} left in the Supply.")
+            s.supply[card] = max(0, s.supply[card] - d)
+        else:
+            s.trash.extend([card] * -d)
+    return notes
+
+
+def _start_next_turn(p: Prompter, engine: DominionRuleEngine, state: GameState) -> GameState:
+    """Carry kingdom, Supply, your deck, trash and history into your next turn."""
+    reg, rules = engine.registry, engine.ruleset
+    s = state.copy()
+    p.say("")
+    p.say("Opponents' turns: what did each of them gain or trash? Blank = nothing (or you didn't see).")
+    p.say("  e.g. 'Silver', 'Province, Copper', '-Estate x2' (trashed). Supply piles and VP update automatically.")
+    for o in s.opponents:
+        while True:
+            try:
+                deltas = parse_deltas(p.ask(f"{o.name}", ""), reg)
+                break
+            except ValueError as e:
+                p.say(f"  {e}")
+        for note in _apply_gains(s, deltas):
+            p.say(f"  {note}")
+        if o.vp is not None:
+            vp_change = sum(d * (reg.get(c).vp or 0) for c, d in deltas.items())
+            o.vp += vp_change
+        else:
+            o.vp = p.ask_int(f"{o.name} VP (blank if unknown)", None, minimum=-100, optional=True)
+
+    if s.owned_cards is not None:
+        while True:
+            try:
+                mine = parse_deltas(p.ask("Did YOU gain or lose cards on their turns? (e.g. '+Curse' from Witch)", ""), reg)
+                break
+            except ValueError as e:
+                p.say(f"  {e}")
+        for note in _apply_gains(s, mine):
+            p.say(f"  {note}")
+        for c, d in mine.items():
+            s.owned_cards[c] = max(0, s.owned_cards.get(c, 0) + d)
+        s.owned_cards = {c: k for c, k in s.owned_cards.items() if k > 0}
+
+    if s.turn_number is not None:
+        s.turn_number += 1
+    while True:
+        hand = p.ask_cards(f"Your new hand for turn {s.turn_number or '?'}", reg, _next_turn_hand_default(s, rules))
+        not_owned = sorted(c for c, k in Counter(hand).items()
+                           if s.owned_cards is not None and s.owned_cards.get(c, 0) < k)
+        if not hand:
+            p.say("  Enter the cards you drew, e.g. 'Silver, Moat, Copper x3'.")
+        elif not_owned:
+            p.say(f"  Your deck doesn't have that many: {', '.join(not_owned)}. Check your hand.")
+        else:
+            break
+    has_action = any(reg.get(c).is_action for c in hand)
+    s.turn = TurnState(
+        phase=Phase.ACTION if has_action else Phase.BUY,  # no Actions in hand: go straight to buying
+        hand=sorted(hand),
+        actions=rules.start_actions,
+        buys=rules.start_buys,
+        coins=rules.start_coins,
+    )
+    s.deck_count = s.discard_count = None  # draws/shuffles are not tracked
+    return s
+
+
 def run_session(p: Prompter, engine: DominionRuleEngine, state: GameState, save_path: str | None = None, top: int = 5) -> int:
     policy = HeuristicPolicy(engine)
+    start_hand = sorted(state.turn.hand + state.turn.in_play)
     while True:
+        if state.turn.phase == Phase.TURN_OVER:
+            if save_path:
+                _save(p, state, save_path)  # autosave after every turn
+            end = engine.game_end_status(state)
+            if end.game_over:
+                p.say("GAME OVER: " + " ".join(end.reasons))
+                return 0
+            try:
+                if not p.ask_yes("Continue to your next turn?", default=True):
+                    return 0
+                state = _start_next_turn(p, engine, state)
+            except Quit:
+                return 0
+            end = engine.game_end_status(state)
+            if end.game_over:
+                p.say("GAME OVER (on an opponent's turn): " + " ".join(end.reasons))
+                break
+            start_hand = sorted(state.turn.hand)
+            continue
+
         issues = validate_state(state, engine)
         shown = [i for i in issues if i.severity != "info"]
         if shown:
@@ -222,9 +374,6 @@ def run_session(p: Prompter, engine: DominionRuleEngine, state: GameState, save_
         p.say("")
         p.say(render_advice(advice, state, engine, top=top))
         p.say("")
-        if state.turn.phase == Phase.TURN_OVER:
-            p.say("Turn finished.")
-            break
         options = advice.ranked[:top]
         p.say("Next: [Enter] apply the recommendation, a number to apply that option, "
               "'s' to save the snapshot, 'q' to quit.")
@@ -250,18 +399,15 @@ def run_session(p: Prompter, engine: DominionRuleEngine, state: GameState, save_
         except Quit:
             break
         if state.turn.phase == Phase.TURN_OVER:
-            for note in transition.notes:
-                if note.startswith("GAME OVER"):
-                    p.say(note)
-            p.say("Turn finished. Ask for a recommendation again at the start of your next turn.")
-            break
+            state.history.append({"turn": state.turn_number, "hand": start_hand, "bought": list(state.turn.bought)})
+            p.say("Turn finished. Bought: " + (fmt_cards(state.turn.bought) if state.turn.bought else "nothing") + ".")
     if save_path:
         _save(p, state, save_path)
     return 0
 
 
 def _save(p: Prompter, state: GameState, path: str | None) -> None:
-    target = path or p.ask("Save snapshot to", "snapshot.json")
+    target = path or p.ask("Save snapshot to", "game.json")
     Path(target).write_text(json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8")
     p.say(f"  Saved to {target}")
 

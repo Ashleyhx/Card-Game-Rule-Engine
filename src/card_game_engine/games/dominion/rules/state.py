@@ -69,18 +69,11 @@ class GameState:
     deck_count: int | None = None
     discard_count: int | None = None
     opponents: list[OpponentInfo] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)  # one {"turn", "hand", "bought"} per finished turn
     assumptions: list[str] = field(default_factory=list)
 
     def copy(self) -> "GameState":
         return copy.deepcopy(self)
-
-    # convenience -------------------------------------------------------
-    @property
-    def phase(self) -> Phase:
-        return self.turn.phase
-
-    def supply_piles(self) -> list[str]:
-        return list(self.supply.keys())
 
     def empty_piles(self) -> list[str]:
         return [name for name, n in self.supply.items() if n <= 0]
@@ -115,6 +108,7 @@ class GameState:
             "opponents": [
                 {"name": o.name, "vp": o.vp, "owned_cards": o.owned_cards} for o in self.opponents
             ],
+            "history": [dict(h) for h in self.history],
         }
         return out
 
@@ -267,10 +261,10 @@ def state_from_dict(
         p = {}
     phase_raw = str(p.get("phase", "action")).lower().strip()
     phase_aliases = {"action": Phase.ACTION, "actions": Phase.ACTION, "a": Phase.ACTION,
-                     "buy": Phase.BUY, "b": Phase.BUY}
+                     "buy": Phase.BUY, "b": Phase.BUY, "turn_over": Phase.TURN_OVER}
     phase = phase_aliases.get(phase_raw)
     if phase is None:
-        errors.append(f"player.phase: must be 'action' or 'buy' (got {p.get('phase')!r}).")
+        errors.append(f"player.phase: must be 'action', 'buy' or 'turn_over' (got {p.get('phase')!r}).")
         phase = Phase.ACTION
 
     hand = _expand(parse_card_counts(p.get("hand", []), registry, "player.hand", errors))
@@ -323,6 +317,21 @@ def state_from_dict(
             errors.append(f"opponents[{i}].vp: must be an integer.")
             vp = None
         opponents.append(OpponentInfo(name=str(o.get("name", f"Opponent {i + 1}")), vp=vp, owned_cards=o_owned))
+    history: list[dict[str, Any]] = []
+    hist_raw = data.get("history", [])
+    if not isinstance(hist_raw, list):
+        errors.append("history: expected a list.")
+        hist_raw = []
+    for i, h in enumerate(hist_raw):
+        if not isinstance(h, dict):
+            errors.append(f"history[{i}]: expected an object.")
+            continue
+        history.append({
+            "turn": _int_field(h, "turn", None, errors, f"history[{i}]", minimum=1),
+            "hand": _expand(parse_card_counts(h.get("hand", []), registry, f"history[{i}].hand", errors)),
+            "bought": _expand(parse_card_counts(h.get("bought", []), registry, f"history[{i}].bought", errors)),
+        })
+
     if isinstance(num_players, int) and len(opponents) > num_players - 1:
         errors.append(f"opponents: {len(opponents)} listed but only {num_players - 1} other player(s) in the game.")
 
@@ -354,6 +363,7 @@ def state_from_dict(
         deck_count=deck_count,
         discard_count=discard_count,
         opponents=opponents,
+        history=history,
         assumptions=assumptions,
     )
 

@@ -58,19 +58,25 @@ def validate_state(state: GameState, engine: DominionRuleEngine | None = None) -
             issues.append(Issue("error", "Treasures are in play but it is the Action phase (Treasures are played in the Buy phase)."))
         if t.bought:
             issues.append(Issue("error", "Cards were bought this turn but it is still the Action phase."))
-    if t.bought and t.phase == Phase.BUY and not rules.no_treasures_after_buying:
-        pass
 
-    # Coin sanity: you cannot have fewer coins than Treasures in play produced minus what you spent.
-    treasure_value = sum(reg.get(c).treasure_value for c in treasures_in_play)
-    if t.silver_played and "Silver" in treasures_in_play:
-        treasure_value += t.merchants_played
-    spent = sum(reg.get(c).cost for c in t.bought)
-    if t.coins < treasure_value - spent:
-        issues.append(Issue(
-            "warning",
-            f"Coins (${t.coins}) are lower than your Treasures in play produce (${treasure_value}) minus spending (${spent}). Double-check 'coins'.",
-        ))
+    # Coin sanity (skipped after Clean-up, which has already discarded everything).
+    if t.phase != Phase.TURN_OVER:
+        treasure_value = sum(reg.get(c).treasure_value for c in treasures_in_play)
+        if t.silver_played and "Silver" in treasures_in_play:
+            treasure_value += t.merchants_played
+        spent = sum(reg.get(c).cost for c in t.bought)
+        expected = treasure_value - spent
+        if not any(reg.get(c).is_action for c in t.in_play) and t.coins > expected:
+            issues.append(Issue(
+                "error",
+                f"Coins (${t.coins}) are more than your cards in play produce (${expected}). "
+                "'coins' counts only cards already played; Treasures still in your hand are added when you play them.",
+            ))
+        elif t.coins < expected:
+            issues.append(Issue(
+                "warning",
+                f"Coins (${t.coins}) are lower than your Treasures in play produce (${treasure_value}) minus spending (${spent}). Double-check 'coins'.",
+            ))
 
     if t.phase == Phase.ACTION and t.actions == 0 and any(reg.get(c).is_action for c in t.hand):
         issues.append(Issue("info", "You have Action cards in hand but 0 Actions left; only 'End Action phase' is legal."))

@@ -37,6 +37,9 @@ def render_state(state: GameState, engine: DominionRuleEngine) -> list[str]:
     opp = [f"{o.name} {o.vp if o.vp is not None else '?'}" for o in state.opponents]
     if opp:
         lines.append("Opponent VP: " + ", ".join(opp))
+    if state.history:
+        lines.append("Bought so far: " + "; ".join(
+            f"T{h['turn'] or '?'} {fmt_cards(h['bought']) if h['bought'] else '-'}" for h in state.history))
     return lines
 
 
@@ -62,6 +65,9 @@ def render_advice(advice: Recommendation, state: GameState, engine: DominionRule
         return "\n".join(lines)
 
     best = advice.best
+    if best is None:
+        lines.append("No moves left this turn.")
+        return "\n".join(lines)
     lines.append(f">> RECOMMENDED: {best.action.describe()}    [confidence: {advice.confidence}]")
     for reason in best.reasons:
         lines.append(f"     {reason}")

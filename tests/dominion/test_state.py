@@ -2,7 +2,10 @@
 
 import pytest
 
-from card_game_engine.games.dominion.rules import SnapshotError, has_errors, state_from_dict, validate_state
+from card_game_engine.games.dominion.cli.commands import load_example
+from card_game_engine.games.dominion.rules import (
+    Buy, EndTurn, PlayAllTreasures, SnapshotError, has_errors, state_from_dict, validate_state,
+)
 from tests.dominion.conftest import FIRST_GAME
 
 
@@ -92,3 +95,18 @@ def test_valid_snapshot_has_no_errors(engine):
     s = state_from_dict(base(phase="buy", hand=["Estate"], in_play=["Silver", "Copper"], coins=3,
                              owned_cards={"Copper": 7, "Estate": 3, "Silver": 1}))
     assert not has_errors(validate_state(s, engine))
+
+
+def test_validation_rejects_coins_from_unplayed_treasures(engine):
+    s = state_from_dict(base(phase="buy", hand=["Copper", "Copper", "Copper"], coins=3))  # nothing played yet
+    issues = validate_state(s, engine)
+    assert has_errors(issues) and any("Treasures still in your hand" in i.message for i in issues)
+
+
+def test_saved_finished_turn_reloads_and_validates(engine):
+    s = state_from_dict(load_example("opening_5_2"))
+    for a in (PlayAllTreasures(), Buy("Moat"), EndTurn()):
+        s = engine.apply(s, a).state
+    reloaded = state_from_dict(s.to_dict())  # what `interactive --load` sees
+    assert reloaded.turn.phase.value == "turn_over" and reloaded.turn.bought == ["Moat"]
+    assert not has_errors(validate_state(reloaded, engine))

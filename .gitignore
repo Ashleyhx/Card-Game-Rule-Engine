@@ -30,4 +30,4 @@ htmlcov/
 .env
 
 # Local runtime output
-snapshot.json
+game.json

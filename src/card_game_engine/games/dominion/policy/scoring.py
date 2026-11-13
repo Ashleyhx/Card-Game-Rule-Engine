@@ -79,11 +79,6 @@ class HeuristicScorer:
             s.note("No Buys left - ending the turn is the only option.")
         return s
 
-    def _vp_of(self, card: CardDef, deck_total_after: int | None) -> int:
-        if card.special == "gardens":
-            return (deck_total_after or 0) // 10
-        return card.vp or 0
-
     def _score_buy(self, state: GameState, ctx: GameContext, name: str) -> Score:
         s = Score()
         card = self.engine.card(name)
@@ -192,13 +187,10 @@ class HeuristicScorer:
         empties_after = [p for p, n in supply_after.items() if n <= 0]
         ends = supply_after.get("Province", 1) <= 0 or len(empties_after) >= self.engine.ruleset.empty_piles_to_end
 
-        deck_total_after = ctx.deck.total + 1 if ctx.deck else None
         if ends:
-            if ctx.vp_known:
-                my_after = ctx.my_vp + self._vp_of(card, deck_total_after)
-                if ctx.deck and card.name != "Gardens" and ctx.deck.counts.get("Gardens"):
-                    # adding a card can raise Gardens' value
-                    my_after = self.engine.victory_points({**ctx.deck.counts, card.name: ctx.deck.counts.get(card.name, 0) + 1})
+            if ctx.vp_known:  # implies the deck is known
+                # Recount the whole deck: one more card can raise every Gardens you own.
+                my_after = self.engine.victory_points({**ctx.deck.counts, card.name: ctx.deck.counts.get(card.name, 0) + 1})
                 best_opp = ctx.max_opponent_vp
                 if my_after > best_opp:
                     s.add(W.WINNING_MOVE_BONUS, f"Ends the game with you ahead ({my_after} vs {best_opp} VP) - a winning buy.")

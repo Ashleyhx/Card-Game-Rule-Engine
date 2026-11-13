@@ -47,7 +47,7 @@ cardgame dominion examples                                 # list bundled exampl
 cardgame dominion recommend --example village_smithy_action
 cardgame dominion recommend --example endgame_penultimate_province
 cardgame dominion interactive                              # build a snapshot by answering questions
-pytest                                                     # run the test suite (155 tests)
+pytest                                                     # run the test suite
 ```
 
 Without installing, you can also run from the repo root:
@@ -95,15 +95,31 @@ to your hand before continuing. Re-run the recommendation with your new hand.
 
 ### Interactive mode
 
-`cardgame dominion interactive` asks about player count, kingdom (the rulebook's First Game set
-or your own 10 cards), changed Supply piles, phase, hand, cards in play, your deck
-(starting deck + changes like `+Silver x2, -Estate`) and opponents' VP. Every question has a
-default and blank = unknown. Card lists accept `3 Copper, Silver x2, throne room`, and typos
-get suggestions.
+`cardgame dominion interactive --save game.json` asks about player count, kingdom (the rulebook's
+First Game set or your own 10 cards) and your turn number.
 
-It then recommends a move. Press Enter to apply it (or type an option number). If the move
-draws cards, it asks what you drew. If the card needs your choices (Chapel, Remodel, Witch's
-attack...), it lists the steps and asks for the result. It never guesses.
+- **Turn 1 or 2: quick start.** You still hold the starting 7 Copper + 3 Estate, so it only asks how
+  many Coppers are in your hand (and, on turn 2, what you bought on turn 1).
+- **Later turns:** changed Supply piles, hand, cards already played, your deck (starting deck +
+  changes like `+Silver x2, -Estate`) and opponents' VP. Coins are asked only if you have already
+  played cards: Treasures still in your hand are added when the tool plays them.
+
+It then recommends a move. Press Enter to apply it (or type an option's number). If the move draws
+cards, it asks what you drew. If a card needs your choices (Chapel, Remodel, Witch's attack...),
+it lists the steps and asks for the result. It never guesses.
+
+When your turn ends it asks what each opponent gained or trashed (e.g. `Province`, `-Estate`; blank =
+nothing), whether you gained anything on their turns (e.g. `+Curse`), and your new hand, then keeps
+going until the game ends. Supply piles and opponents' VP update from what you enter; the kingdom,
+your deck and a per-turn list of what you bought carry over. With `--save` the game is written after
+every turn, so you can stop and resume with `cardgame dominion interactive --load game.json --save game.json`.
+
+To try a game already in progress:
+
+```bash
+cardgame dominion examples --show saved_game_turn_3 > game.json
+cardgame dominion interactive --load game.json --save game.json
+```
 
 ---
 
@@ -122,7 +138,7 @@ omitted is treated as **unknown** and reported as such. It is never made up.
   "supply": {"Province": 8, "Curse": 6},   // optional; missing piles are assumed full (flagged)
   "trash": ["Copper"],                     // optional
   "player": {
-    "phase": "buy",                        // "action" | "buy"
+    "phase": "buy",                        // "action" | "buy" ("turn_over" in saved games)
     "hand": ["Gold", "Silver", "Copper", "Copper", "Estate"],   // or {"Copper": 2, ...}
     "in_play": [],                         // cards already played this turn
     "actions": 1, "buys": 1, "coins": 0,   // current remaining resources
@@ -130,7 +146,9 @@ omitted is treated as **unknown** and reported as such. It is never made up.
     "owned_cards": {"Copper": 7, "Estate": 3, "Silver": 3, "Gold": 1, "Witch": 1},  // optional: whole deck
     "deck_count": 4, "discard_count": 8     // optional
   },
-  "opponents": [{"name": "Opponent", "vp": 0}]   // optional; vp or owned_cards
+  "opponents": [{"name": "Opponent", "vp": 0}],  // optional; vp or owned_cards
+  "history": [{"turn": 1, "hand": ["Copper", "Copper", "Copper", "Estate", "Estate"], "bought": ["Silver"]}]
+                                           // optional; written by `interactive --save`
 }
 ```
 
@@ -149,6 +167,7 @@ Tip: `cardgame dominion examples --show witch_midgame_buy > my_turn.json` gives 
 | `endgame_winning_province` | Last Province wins the game |
 | `three_pile_ending` | Ending the game on piles while ahead |
 | `unknown_deck_minimal` | Minimal info: shows how uncertainty is reported |
+| `saved_game_turn_3` | Saved 3-player game with turn history: continue it in interactive mode |
 
 ---
 
@@ -209,31 +228,12 @@ src/card_game_engine/
 tests/
   test_core.py   registry, interface conformance, a game-agnostic agent-style loop
   dominion/      cards/setup, engine, state, policy, CLI, offline check
-docs/            RULES_RESEARCH.md, ARCHITECTURE.md, flowchart.svg/.png
+docs/            RULES_RESEARCH.md, ARCHITECTURE.md, flowchart.svg
 ```
 
 Rule engines never import policies, and `core` imports no game. To add a new card game,
 follow the six steps in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#adding-another-card-game):
 make a `games/<id>/` package, implement the core contracts, expose `GAME`, and register it.
-
-```mermaid
-flowchart TD
-  R[Rule research - dev time] --> D[(Bundled JSON data)]
-  G[cardgame GAME command - core registry loads the game plugin] --> I1 & I2 & I3
-  I1[Snapshot JSON] --> P[Parse snapshot]
-  I2[--example] --> P
-  I3[Interactive wizard] --> P
-  D -.-> P
-  P --> V[Validate against rules]
-  V -->|errors| X[Report issues, exit 1]
-  V --> E[Game rule engine: legal_actions]
-  E --> Q{Pending draws / manual steps?}
-  Q -->|yes| U[Ask user, resolve_pending] --> E
-  Q -->|no| A[Decision policy: context, score, rank]
-  A --> PL[Plan + confidence + uncertainty]
-  PL --> O[Output: text / JSON]
-  O -->|interactive| M[User picks move, engine.apply] --> E
-```
 
 ## Roadmap (future phases, not implemented yet)
 

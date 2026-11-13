@@ -7,7 +7,7 @@ import pytest
 
 from card_game_engine.games.dominion.policy import HeuristicPolicy, build_context
 from card_game_engine.games.dominion.rules import Buy, EndActionPhase, PlayAction, PlayAllTreasures, DominionRuleEngine, state_from_dict
-from tests.dominion.conftest import FIRST_GAME, OTHER_KINGDOM
+from tests.dominion.conftest import OTHER_KINGDOM
 
 
 def load_example(name):
@@ -78,6 +78,14 @@ def test_avoid_losing_game_end(policy, make_state):
     assert a.best.action != Buy("Province")
     prov = next(r for r in a.ranked if r.action == Buy("Province"))
     assert prov.score < 0 and any("you would lose" in r for r in prov.reasons)
+
+
+def test_game_ending_gardens_buy_recounts_owned_gardens(policy, make_state):
+    # 19 cards with 2 Gardens (5 VP). Buying the last Gardens makes 20 cards: 3 Gardens x 2 + 3 Estates = 9 VP.
+    s = make_state(kingdom=OTHER_KINGDOM, phase="buy", coins=4, supply={"Gardens": 1, "Curse": 0, "Poacher": 0},
+                   owned_cards={"Copper": 7, "Estate": 3, "Silver": 7, "Gardens": 2}, opponents=[{"name": "X", "vp": 8}])
+    gardens = next(r for r in policy.recommend(s).ranked if r.action == Buy("Gardens"))
+    assert any("winning buy" in r and "9 vs 8" in r for r in gardens.reasons)
 
 
 def test_unknown_vp_game_end_warns(policy, make_state):
