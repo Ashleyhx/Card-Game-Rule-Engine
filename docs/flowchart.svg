@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 1010" width="890" height="1010" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" xmlns:c2pa="http://c2pa.org/manifest">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="890" height="1010" fill="#ffffff"/>
+  <text x="445" y="30" text-anchor="middle" font-size="18" font-weight="600" fill="#222">Card Game Rule Engine - end-to-end flow (Dominion plugin)</text>
+
+  <!-- Development time -->
+  <rect x="20" y="50" width="850" height="110" rx="10" fill="#f6f4ee" stroke="#b9b29a" stroke-dasharray="6 4"/>
+  <text x="36" y="72" font-size="12" font-weight="600" fill="#7a6f4e">DEVELOPMENT TIME (online, one-off)</text>
+  <rect x="40" y="84" width="380" height="60" rx="8" fill="#fff7e0" stroke="#c9a640"/>
+  <text x="230" y="108" text-anchor="middle" font-size="14" font-weight="600" fill="#222">Rule research</text>
+  <text x="230" y="128" text-anchor="middle" font-size="12" fill="#555">RGG 2E rulebook, card sheet, DominionStrategy cross-checks</text>
+  <rect x="470" y="84" width="380" height="60" rx="8" fill="#fff7e0" stroke="#c9a640"/>
+  <text x="660" y="108" text-anchor="middle" font-size="14" font-weight="600" fill="#222">Verified data bundled in the game plugin</text>
+  <text x="660" y="128" text-anchor="middle" font-size="12" fill="#555">cards_base_2e.json, rules_base_2e.json</text>
+  <line x1="420" y1="114" x2="468" y2="114" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Runtime group -->
+  <rect x="20" y="178" width="850" height="812" rx="10" fill="#f3f6fb" stroke="#8ea3c4" stroke-dasharray="6 4"/>
+  <text x="36" y="200" font-size="12" font-weight="600" fill="#3d5680">RUNTIME (fully offline)  -  cardgame dominion ...  -  core registry loads the Dominion game plugin</text>
+
+  <!-- data feed -->
+  <path d="M660,144 L660,328 L522,328" fill="none" stroke="#c9a640" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+  <text x="668" y="300" font-size="11" fill="#7a6f4e">loaded locally</text>
+
+  <!-- inputs -->
+  <rect x="40" y="214" width="180" height="50" rx="8" fill="#ffffff" stroke="#8ea3c4"/>
+  <text x="130" y="244" text-anchor="middle" font-size="13" fill="#222">Snapshot JSON file</text>
+  <rect x="240" y="214" width="180" height="50" rx="8" fill="#ffffff" stroke="#8ea3c4"/>
+  <text x="330" y="244" text-anchor="middle" font-size="13" fill="#222">--example NAME</text>
+  <rect x="440" y="214" width="180" height="50" rx="8" fill="#ffffff" stroke="#8ea3c4"/>
+  <text x="530" y="244" text-anchor="middle" font-size="13" fill="#222">Interactive wizard</text>
+  <path d="M130,264 L130,282 L330,282 L330,298" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="330" y1="264" x2="330" y2="298" stroke="#444" stroke-width="1.5"/>
+  <path d="M530,264 L530,282 L330,282" fill="none" stroke="#444" stroke-width="1.5"/>
+
+  <!-- 1 parse -->
+  <rect x="140" y="300" width="380" height="56" rx="8" fill="#e8eef9" stroke="#5b79a8"/>
+  <text x="330" y="323" text-anchor="middle" font-size="14" font-weight="600" fill="#222">1. Parse snapshot</text>
+  <text x="330" y="342" text-anchor="middle" font-size="12" fill="#555">state_from_dict: canonical names, unknowns kept unknown</text>
+  <line x1="330" y1="356" x2="330" y2="384" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 2 validate -->
+  <rect x="140" y="386" width="380" height="56" rx="8" fill="#e8eef9" stroke="#5b79a8"/>
+  <text x="330" y="409" text-anchor="middle" font-size="14" font-weight="600" fill="#222">2. Validate against the rules</text>
+  <text x="330" y="428" text-anchor="middle" font-size="12" fill="#555">supply bounds, hand within deck, phase consistency</text>
+  <line x1="330" y1="442" x2="330" y2="458" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- errors diamond -->
+  <polygon points="330,460 400,490 330,520 260,490" fill="#fff" stroke="#5b79a8"/>
+  <text x="330" y="494" text-anchor="middle" font-size="12" fill="#222">Errors?</text>
+  <line x1="400" y1="490" x2="598" y2="490" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="420" y="483" font-size="11" fill="#555">yes</text>
+  <rect x="600" y="465" width="240" height="50" rx="8" fill="#fbeaea" stroke="#c0605a"/>
+  <text x="720" y="487" text-anchor="middle" font-size="13" font-weight="600" fill="#222">Report every issue</text>
+  <text x="720" y="504" text-anchor="middle" font-size="12" fill="#555">no advice on an invalid state (exit 1)</text>
+  <line x1="330" y1="520" x2="330" y2="548" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="338" y="538" font-size="11" fill="#555">no</text>
+
+  <!-- 3 engine -->
+  <rect x="140" y="550" width="380" height="56" rx="8" fill="#e3f2e8" stroke="#4f9a6a"/>
+  <text x="330" y="573" text-anchor="middle" font-size="14" font-weight="600" fill="#222">3. Game rule engine (DominionRuleEngine)</text>
+  <text x="330" y="592" text-anchor="middle" font-size="12" fill="#555">legal_actions(), check() reasons, game_end_status()</text>
+  <line x1="330" y1="606" x2="330" y2="624" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- pending diamond -->
+  <polygon points="330,626 450,660 330,694 210,660" fill="#fff" stroke="#4f9a6a"/>
+  <text x="330" y="656" text-anchor="middle" font-size="12" fill="#222">Pending draws or</text>
+  <text x="330" y="671" text-anchor="middle" font-size="12" fill="#222">manual steps?</text>
+  <line x1="450" y1="660" x2="598" y2="660" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="470" y="653" font-size="11" fill="#555">yes</text>
+  <rect x="600" y="632" width="240" height="56" rx="8" fill="#fff" stroke="#4f9a6a"/>
+  <text x="720" y="655" text-anchor="middle" font-size="13" font-weight="600" fill="#222">Ask what you drew / chose</text>
+  <text x="720" y="674" text-anchor="middle" font-size="12" fill="#555">resolve_pending() - never guessed</text>
+  <path d="M720,632 L720,592 L522,592" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="330" y1="694" x2="330" y2="728" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="338" y="716" font-size="11" fill="#555">no</text>
+
+  <!-- 4 advisor -->
+  <rect x="140" y="730" width="380" height="56" rx="8" fill="#efe8f8" stroke="#8a6bbf"/>
+  <text x="330" y="753" text-anchor="middle" font-size="14" font-weight="600" fill="#222">4. Decision policy (HeuristicPolicy)</text>
+  <text x="330" y="772" text-anchor="middle" font-size="12" fill="#555">context (stage, VP, deck) - score each legal action - rank</text>
+  <line x1="330" y1="786" x2="330" y2="814" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 5 plan -->
+  <rect x="140" y="816" width="380" height="56" rx="8" fill="#efe8f8" stroke="#8a6bbf"/>
+  <text x="330" y="839" text-anchor="middle" font-size="14" font-weight="600" fill="#222">5. Plan, confidence, uncertainty</text>
+  <text x="330" y="858" text-anchor="middle" font-size="12" fill="#555">simulate with engine.apply(), stop at hidden information</text>
+  <line x1="330" y1="872" x2="330" y2="900" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 6 output -->
+  <rect x="140" y="902" width="380" height="56" rx="8" fill="#ffffff" stroke="#5b79a8"/>
+  <text x="330" y="925" text-anchor="middle" font-size="14" font-weight="600" fill="#222">6. Output</text>
+  <text x="330" y="944" text-anchor="middle" font-size="12" fill="#555">best move, alternatives, reasons, warnings (text or --json)</text>
+
+  <!-- interactive loop -->
+  <line x1="520" y1="930" x2="598" y2="930" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="600" y="902" width="240" height="56" rx="8" fill="#fff" stroke="#8ea3c4"/>
+  <text x="720" y="925" text-anchor="middle" font-size="13" font-weight="600" fill="#222">Interactive: you pick a move</text>
+  <text x="720" y="944" text-anchor="middle" font-size="12" fill="#555">engine.apply() - new state</text>
+  <path d="M840,930 L858,930 L858,564 L522,564" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="790" y="558" font-size="11" fill="#555">loop until turn ends</text>
+<metadata><c2pa:manifest>AAAWgmp1bWIAAAAeanVtZGMycGEAEQAQgAAAqgA4m3EDYzJwYQAAABZcanVtYgAAAEdqdW1kYzJtYQARABCAAACqADibcQN1cm46YzJwYTozYmJlYzY2Mi05ZmNmLTQ2ZmMtYWYzOC0zZjJiYTEyZmU1ZjAAAAADl2p1bWIAAAApanVtZGMyYXMAEQAQgAAAqgA4m3EDYzJwYS5hc3NlcnRpb25zAAAAALxqdW1iAAAARGp1bWRjYm9yABEAEIAAAKoAOJtxE2MycGEuaW5ncmVkaWVudC52MwAAAAAYYzJzaND03TrP0E1me5cAGgtwe1AAAABwY2JvcqNpZGM6Zm9ybWF0bWltYWdlL3N2Zyt4bWxqaW5zdGFuY2VJRHgseG1wOmlpZDpiN2M0Mjg1Zi03NzQ1LTQwOTktODE2MS01YmI4NGI3NzQ3NWJscmVsYXRpb25zaGlwaHBhcmVudE9mAAAB4mp1bWIAAABBanVtZGNib3IAEQAQgAAAqgA4m3ETYzJwYS5hY3Rpb25zLnYyAAAAABhjMnNoNtI2CgIlX0GuHK52/6zwHQAAAZljYm9yomdhY3Rpb25zgqJmYWN0aW9ua2MycGEub3BlbmVkanBhcmFtZXRlcnOha2luZ3JlZGllbnRzgaJjdXJseC1zZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmluZ3JlZGllbnQudjNkaGFzaFggDWbQXZoLsA3leltJgWqq0B1SCYNKB+UjQSNk9p0FTyKkZmFjdGlvbngdY29tLmFudGhyb3BpYy5jbGF1ZGUucHJvdmlkZWRqcGFyYW1ldGVyc6F4H2NvbS5hbnRocm9waWMub3JpZ2luLWNvbmZpZGVuY2VndW5rbm93bmtkZXNjcmlwdGlvbnhmQ2xhdWRlIHByb3ZpZGVkIHRoaXMgZmlsZSBhdCB0aGUgcmVxdWVzdCBvZiBhIHVzZXIgYW5kIG1heSBoYXZlIGNyZWF0ZWQgb3IgbW9kaWZpZWQgdGhlIGZpbGUgY29udGVudHMubXNvZnR3YXJlQWdlbnShZG5hbWVmQ2xhdWRlcmFsbEFjdGlvbnNJbmNsdWRlZPUAAADIanVtYgAAAEBqdW1kY2JvcgARABCAAACqADibcRNjMnBhLmhhc2guZGF0YQAAAAAYYzJzaGHBfcjAfMsySAmmAL15jlgAAACAY2JvcqVjYWxnZnNoYTI1NmNwYWRMAAAAAAAAAAAAAAAAZGhhc2hYIL0wnCd3dO3LGp54o6E3v2wsTbENQhMZ+AEqMGTXZOQBZG5hbWVuanVtYmYgbWFuaWZlc3RqZXhjbHVzaW9uc4GiZXN0YXJ0GSCrZmxlbmd0aBkeBAAAAj5qdW1iAAAAJ2p1bWRjMmNsABEAEIAAAKoAOJtxA2MycGEuY2xhaW0udjIAAAACD2Nib3KlY2FsZ2ZzaGEyNTZpc2lnbmF0dXJleE1zZWxmI2p1bWJmPS9jMnBhL3VybjpjMnBhOjNiYmVjNjYyLTlmY2YtNDZmYy1hZjM4LTNmMmJhMTJmZTVmMC9jMnBhLnNpZ25hdHVyZWppbnN0YW5jZUlEeCx4bXA6aWlkOmEzYzAwZjQ2LTExZTEtNGU3OC1iZTRmLTVlYjMyYTlkNDI4Y3JjcmVhdGVkX2Fzc2VydGlvbnODomN1cmx4LXNlbGYjanVtYmY9YzJwYS5hc3NlcnRpb25zL2MycGEuaW5ncmVkaWVudC52M2RoYXNoWCANZtBdmguwDeV6W0mBaqrQHVIJg0oH5SNBI2T2nQVPIqJjdXJseCpzZWxmI2p1bWJmPWMycGEuYXNzZXJ0aW9ucy9jMnBhLmFjdGlvbnMudjJkaGFzaFggnKeJPHgq7hVfUjo0UUiNZX5Zi8hDTKVPNcOLl75knjqiY3VybHgpc2VsZiNqdW1iZj1jMnBhLmFzc2VydGlvbnMvYzJwYS5oYXNoLmRhdGFkaGFzaFggnleNKpwrGFxLdaCESHHuOxMRG3NknPM5hvydxCo6nhh0Y2xhaW1fZ2VuZXJhdG9yX2luZm+jZG5hbWVvQW50aHJvcGljIEZpbGVzZ3ZlcnNpb25lMS4wLjBrc3BlY1ZlcnNpb25lMi40LjAAABA4anVtYgAAAChqdW1kYzJjcwARABCAAACqADibcQNjMnBhLnNpZ25hdHVyZQAAABAIY2JvctKEWQISogEmGCFZAgowggIGMIIBjaADAgECAhRA5aAK7sI50L64g/oGQgU9Z1UTADAKBggqhkjOPQQDAzBJMRcwFQYDVQQKEw5BbnRocm9waWMsIFBCQzEuMCwGA1UEAxMlQW50aHJvcGljIENvbnRlbnQgQ3JlZGVudGlhbHMgUm9vdCBDQTAeFw0yNjA4MDcxODQzNTZaFw0yODA4MDYxOTQzNTZaMEQxFzAVBgNVBAoTDkFudGhyb3BpYywgUEJDMSkwJwYDVQQDEyBBbnRocm9waWMgQ2xhdWRlIENvbnRlbnQgU2lnbmluZzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJh6CmvLUBgFFNU0vUKlOVtE6djd17L5SuwX0LemFisBM3dkd/3cyjxFA3Qo5S46fX0/ihY0VZ7mfb9KF703t5OjWDBWMA4GA1UdDwEB/wQEAwIHgDAVBgNVHSUEDjAMBgorBgEEAYPoXgIBMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUzlHiBIFOZFsj+OPEz5o+nMHXXMIwCgYIKoZIzj0EAwMDZwAwZAIwMXMdFJ4BetLLVY7ORuE9noqbbAZOZn/aArXyTwFAZfKrPzxF2vPoJNf1+UCdg1XGAjBwX1zd9WGqYkqmL5SFqw1QySjr1zJfpJM9+1rdDwSPLMOPOjKuiXjoU/pUUeG9RwmhY3BhZFkNngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPZYQBi6cuQzgPcyFeHNUfg5BOszdHteYCQQ70vxFvcf1BFcp/891rqEVSou6P3VGYGqgRrfqMslAzCqBIDiDXWOg4M=</c2pa:manifest></metadata></svg>

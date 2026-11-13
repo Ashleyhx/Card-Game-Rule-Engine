@@ -1,0 +1,31 @@
+{
+  "ruleset_id": "base-2e",
+  "name": "Dominion Second Edition - Base Set rules (V1 subset)",
+  "research_date": "2026-11-13",
+  "primary_source": "https://www.riograndegames.com/wp-content/uploads/2016/09/Dominion2E.pdf",
+  "supported_player_counts": [2, 3, 4],
+  "starting_deck": {"Copper": 7, "Estate": 3},
+  "hand_size": 5,
+  "turn_start": {"actions": 1, "buys": 1, "coins": 0},
+  "kingdom_pile_count": 10,
+  "kingdom_pile_size": 10,
+  "base_supply": ["Copper", "Silver", "Gold", "Estate", "Duchy", "Province", "Curse"],
+  "pile_sizes": {
+    "Copper": {"2": 46, "3": 39, "4": 32},
+    "Silver": {"2": 40, "3": 40, "4": 40},
+    "Gold": {"2": 30, "3": 30, "4": 30},
+    "Estate": {"2": 8, "3": 12, "4": 12},
+    "Duchy": {"2": 8, "3": 12, "4": 12},
+    "Province": {"2": 8, "3": 12, "4": 12},
+    "Curse": {"2": 10, "3": 20, "4": 30},
+    "victory_kingdom": {"2": 8, "3": 12, "4": 12}
+  },
+  "game_end": {
+    "checked": "end_of_turn",
+    "province_pile_empty": true,
+    "empty_supply_piles": 3
+  },
+  "buy_phase": {"no_treasures_after_buying": true},
+  "tie_break": ["most_vp", "fewest_turns", "shared_victory"],
+  "first_game_kingdom": ["Cellar", "Market", "Merchant", "Militia", "Mine", "Moat", "Remodel", "Smithy", "Village", "Workshop"]
+}

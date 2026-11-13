@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "description": "Two piles are empty and Village has 1 left; you're ahead, so a $3 buy can end the game.",
+  "num_players": 2,
+  "turn_number": 22,
+  "kingdom": [
+    "Cellar",
+    "Moat",
+    "Workshop",
+    "Gardens",
+    "Militia",
+    "Smithy",
+    "Village",
+    "Market",
+    "Laboratory",
+    "Witch"
+  ],
+  "supply": {
+    "Copper": 30,
+    "Silver": 40,
+    "Gold": 30,
+    "Estate": 5,
+    "Duchy": 3,
+    "Province": 4,
+    "Curse": 10,
+    "Cellar": 10,
+    "Moat": 10,
+    "Workshop": 0,
+    "Gardens": 0,
+    "Militia": 10,
+    "Smithy": 10,
+    "Village": 1,
+    "Market": 10,
+    "Laboratory": 10,
+    "Witch": 10
+  },
+  "player": {
+    "phase": "buy",
+    "hand": [
+      "Silver",
+      "Copper",
+      "Estate",
+      "Gardens",
+      "Gardens"
+    ],
+    "owned_cards": {
+      "Copper": 12,
+      "Estate": 6,
+      "Silver": 4,
+      "Workshop": 5,
+      "Gardens": 5,
+      "Duchy": 2,
+      "Village": 3,
+      "Province": 1
+    },
+    "deck_count": 12,
+    "discard_count": 16
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 24
+    }
+  ]
+}

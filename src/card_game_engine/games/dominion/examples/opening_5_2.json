@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "description": "Turn 1 of a First Game kingdom: you drew 5 Coppers (a 5/2 opening).",
+  "num_players": 2,
+  "turn_number": 1,
+  "kingdom": [
+    "Cellar",
+    "Market",
+    "Merchant",
+    "Militia",
+    "Mine",
+    "Moat",
+    "Remodel",
+    "Smithy",
+    "Village",
+    "Workshop"
+  ],
+  "supply": {
+    "Copper": 46,
+    "Silver": 40,
+    "Gold": 30,
+    "Estate": 8,
+    "Duchy": 8,
+    "Province": 8,
+    "Curse": 10,
+    "Cellar": 10,
+    "Market": 10,
+    "Merchant": 10,
+    "Militia": 10,
+    "Mine": 10,
+    "Moat": 10,
+    "Remodel": 10,
+    "Smithy": 10,
+    "Village": 10,
+    "Workshop": 10
+  },
+  "player": {
+    "phase": "buy",
+    "hand": [
+      "Copper",
+      "Copper",
+      "Copper",
+      "Copper",
+      "Copper"
+    ],
+    "owned_cards": {
+      "Copper": 7,
+      "Estate": 3
+    },
+    "deck_count": 5,
+    "discard_count": 0
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 3
+    }
+  ]
+}

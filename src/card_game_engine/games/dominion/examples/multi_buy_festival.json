@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "description": "Buy phase after Festival + Market: 3 Buys and $10 to split.",
+  "num_players": 3,
+  "turn_number": 12,
+  "kingdom": [
+    "Cellar",
+    "Chapel",
+    "Village",
+    "Smithy",
+    "Throne Room",
+    "Moneylender",
+    "Festival",
+    "Laboratory",
+    "Market",
+    "Witch"
+  ],
+  "supply": {
+    "Copper": 39,
+    "Silver": 33,
+    "Gold": 26,
+    "Estate": 12,
+    "Duchy": 12,
+    "Province": 10,
+    "Curse": 20,
+    "Cellar": 10,
+    "Chapel": 10,
+    "Village": 10,
+    "Smithy": 10,
+    "Throne Room": 10,
+    "Moneylender": 10,
+    "Festival": 7,
+    "Laboratory": 7,
+    "Market": 8,
+    "Witch": 10
+  },
+  "player": {
+    "phase": "buy",
+    "hand": [
+      "Gold",
+      "Silver",
+      "Copper",
+      "Copper"
+    ],
+    "in_play": [
+      "Festival",
+      "Market"
+    ],
+    "actions": 2,
+    "buys": 3,
+    "coins": 3,
+    "owned_cards": {
+      "Copper": 7,
+      "Estate": 3,
+      "Silver": 3,
+      "Gold": 2,
+      "Festival": 2,
+      "Market": 1,
+      "Laboratory": 2,
+      "Village": 1,
+      "Smithy": 1,
+      "Province": 1
+    },
+    "deck_count": 6,
+    "discard_count": 8
+  },
+  "opponents": [
+    {
+      "name": "Alice",
+      "vp": 15
+    },
+    {
+      "name": "Bob",
+      "vp": 9
+    }
+  ]
+}

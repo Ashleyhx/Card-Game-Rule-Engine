@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "description": "2 Provinces left, you have $8 but are behind: the Penultimate Province Rule applies.",
+  "num_players": 2,
+  "turn_number": 18,
+  "kingdom": [
+    "Cellar",
+    "Market",
+    "Merchant",
+    "Militia",
+    "Mine",
+    "Moat",
+    "Remodel",
+    "Smithy",
+    "Village",
+    "Workshop"
+  ],
+  "supply": {
+    "Copper": 46,
+    "Silver": 30,
+    "Gold": 24,
+    "Estate": 8,
+    "Duchy": 5,
+    "Province": 2,
+    "Curse": 10,
+    "Cellar": 10,
+    "Market": 6,
+    "Merchant": 10,
+    "Militia": 10,
+    "Mine": 10,
+    "Moat": 10,
+    "Remodel": 10,
+    "Smithy": 7,
+    "Village": 10,
+    "Workshop": 10
+  },
+  "player": {
+    "phase": "buy",
+    "hand": [
+      "Gold",
+      "Gold",
+      "Silver",
+      "Estate",
+      "Province"
+    ],
+    "owned_cards": {
+      "Copper": 7,
+      "Estate": 3,
+      "Silver": 5,
+      "Gold": 3,
+      "Smithy": 2,
+      "Market": 2,
+      "Province": 3,
+      "Duchy": 1
+    },
+    "deck_count": 10,
+    "discard_count": 11
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 30
+    }
+  ]
+}

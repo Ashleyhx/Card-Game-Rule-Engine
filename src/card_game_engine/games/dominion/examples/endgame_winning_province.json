@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "description": "Last Province available and you are within 6 VP: buying it ends and wins the game.",
+  "num_players": 2,
+  "turn_number": 20,
+  "kingdom": [
+    "Cellar",
+    "Market",
+    "Merchant",
+    "Militia",
+    "Mine",
+    "Moat",
+    "Remodel",
+    "Smithy",
+    "Village",
+    "Workshop"
+  ],
+  "supply": {
+    "Copper": 46,
+    "Silver": 30,
+    "Gold": 24,
+    "Estate": 8,
+    "Duchy": 4,
+    "Province": 1,
+    "Curse": 10,
+    "Cellar": 10,
+    "Market": 6,
+    "Merchant": 10,
+    "Militia": 10,
+    "Mine": 10,
+    "Moat": 10,
+    "Remodel": 10,
+    "Smithy": 7,
+    "Village": 10,
+    "Workshop": 10
+  },
+  "player": {
+    "phase": "buy",
+    "hand": [
+      "Gold",
+      "Gold",
+      "Silver",
+      "Estate",
+      "Duchy"
+    ],
+    "owned_cards": {
+      "Copper": 7,
+      "Estate": 3,
+      "Silver": 5,
+      "Gold": 3,
+      "Smithy": 2,
+      "Market": 2,
+      "Province": 3,
+      "Duchy": 2
+    },
+    "deck_count": 8,
+    "discard_count": 14
+  },
+  "opponents": [
+    {
+      "name": "Opponent",
+      "vp": 29
+    }
+  ]
+}

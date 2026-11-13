@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "description": "Minimal snapshot: only hand, phase and kingdom are known (supply and deck unknown).",
+  "num_players": 4,
+  "kingdom": [
+    "Cellar",
+    "Market",
+    "Merchant",
+    "Militia",
+    "Mine",
+    "Moat",
+    "Remodel",
+    "Smithy",
+    "Village",
+    "Workshop"
+  ],
+  "player": {
+    "phase": "action",
+    "hand": [
+      "Militia",
+      "Market",
+      "Copper",
+      "Silver",
+      "Estate"
+    ]
+  }
+}
