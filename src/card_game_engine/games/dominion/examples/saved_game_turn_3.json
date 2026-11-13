@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Saved 3-player game at the start of turn 3 (with turn history): continue it with 'interactive --load'.",
+  "num_players": 3,
+  "turn_number": 3,
+  "kingdom": ["Cellar", "Market", "Merchant", "Militia", "Mine", "Moat", "Remodel", "Smithy", "Village", "Workshop"],
+  "supply": {
+    "Copper": 39, "Silver": 37, "Gold": 30, "Estate": 12, "Duchy": 12, "Province": 12, "Curse": 20,
+    "Cellar": 10, "Market": 10, "Merchant": 10, "Militia": 9, "Mine": 10,
+    "Moat": 9, "Remodel": 10, "Smithy": 9, "Village": 10, "Workshop": 10
+  },
+  "player": {
+    "phase": "action",
+    "hand": ["Moat", "Silver", "Copper", "Copper", "Estate"],
+    "owned_cards": {"Copper": 7, "Estate": 3, "Silver": 1, "Moat": 1}
+  },
+  "opponents": [
+    {"name": "Opponent 1", "vp": 3},
+    {"name": "Opponent 2", "vp": 3}
+  ],
+  "history": [
+    {"turn": 1, "hand": ["Copper", "Copper", "Copper", "Copper", "Estate"], "bought": ["Silver"]},
+    {"turn": 2, "hand": ["Copper", "Copper", "Copper", "Estate", "Estate"], "bought": ["Moat"]}
+  ]
+}
