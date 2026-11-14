@@ -2,6 +2,7 @@
 
 * ``rules``  - verified card data + deterministic rule engine (no strategy)
 * ``policy`` - heuristic decision policy that ranks the engine's legal actions
+* ``inference`` - observation-tracking session: belief over hidden zones, cross-turn inference
 * ``cli``    - ``cardgame dominion ...`` commands and the interactive assistant
 """
 
@@ -34,6 +35,12 @@ def _register_cli(parser):
     register_cli(parser)
 
 
+def _initialize_session(config: dict):
+    from .inference import initialize_session
+
+    return initialize_session(config)
+
+
 GAME = GameDefinition(
     id="dominion",
     name="Dominion",
@@ -43,4 +50,5 @@ GAME = GameDefinition(
     parse_state=_parse_state,
     register_cli=_register_cli,
     description="Deck-building card game by Donald X. Vaccarino (Rio Grande Games). Rules researched 2026-11-13.",
+    initialize_session=_initialize_session,
 )

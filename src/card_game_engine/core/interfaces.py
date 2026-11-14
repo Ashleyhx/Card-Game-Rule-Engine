@@ -84,3 +84,4 @@ class GameDefinition:
     parse_state: Callable[[dict], Any]      # snapshot dict -> typed state
     register_cli: Callable[[argparse.ArgumentParser], None]
     description: str = ""
+    initialize_session: Callable[[dict], Any] | None = None  # config dict -> tracking session (optional)

@@ -5,12 +5,15 @@ from importlib import resources
 
 import pytest
 
+from fractions import Fraction
+
 from card_game_engine.games.dominion.planning import (
-    PlanConfig, compare_actions, evaluate_action_sequences, get_objective, plan_next_action,
+    PlanConfig, card_totals, compare_actions, evaluate_action_sequences, from_game_state, get_objective,
+    plan_next_action, projected_hand_count, simulate_projected_cleanup,
 )
 from card_game_engine.games.dominion.policy import HeuristicPolicy
 from card_game_engine.games.dominion.rules import (
-    Buy, EndTurn, PlayAction, action_from_dict, action_to_dict, state_from_dict,
+    Buy, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure, action_from_dict, action_to_dict, state_from_dict,
 )
 from tests.dominion.conftest import FIRST_GAME
 
@@ -268,12 +271,21 @@ def test_compare_actions_dicts_objects_and_illegal(engine):
 def test_evaluate_action_sequences_covers_every_legal_first_action(engine):
     state = snap(phase="buy", hand=["Copper", "Silver"])
     cands = evaluate_action_sequences(state, engine=engine)
-    assert sorted(c.action_key for c in cands) == sorted(a.describe() for a in engine.legal_actions(state))
+    # Single Play-Treasure actions are collapsed into Play-all-Treasures (as plan_next_action does); Buys are kept.
+    legal = [a.describe() for a in engine.legal_actions(state)]
+    assert "Play Copper" in legal and "Play Silver" in legal
+    assert sorted(c.action_key for c in cands) == sorted(k for k in legal if k not in ("Play Copper", "Play Silver"))
     vals = {c.action_key: c.expected_value for c in cands}
-    # Playing one Treasure first loses nothing (the other is played next); buying first forfeits the Treasures.
-    assert vals["Play all Treasures"] == vals["Play Copper"] == vals["Play Silver"] == pytest.approx(3.0)
+    # Buying first forfeits the Treasures.
+    assert vals["Play all Treasures"] == pytest.approx(3.0)
     assert vals["Buy Copper"] == pytest.approx(0.0)
     assert cands[0].expected_value == pytest.approx(3.0)
+    # compare_actions without candidates is the same comparison; explicit candidates may name a single Treasure.
+    assert [c.action_key for c in compare_actions(state, engine=engine).candidates] == [c.action_key for c in cands]
+    res = compare_actions(state, [PlayTreasure("Copper"), PlayAllTreasures()], engine=engine)
+    vals = {c.action_key: c.expected_value for c in res.candidates}
+    # Playing one Treasure first loses nothing (the other is played next).
+    assert vals == {"Play Copper": pytest.approx(3.0), "Play all Treasures": pytest.approx(3.0)}
 
 
 def test_config_and_objective_validation():
@@ -281,7 +293,7 @@ def test_config_and_objective_validation():
     assert PlanConfig.from_dict(cfg.to_dict()) == cfg
     with pytest.raises(ValueError, match="unknown PlanConfig"):
         PlanConfig.from_dict({"depth": 3})
-    with pytest.raises(ValueError, match="money, threshold:<T>, purchase, next_hand_money"):
+    with pytest.raises(ValueError, match="money, threshold:<T>, purchase, next_hand_money, future_money"):
         PlanConfig(objective="greed")
     with pytest.raises(ValueError):
         PlanConfig(horizon="game")
@@ -355,3 +367,198 @@ def test_money_objective_says_purchase_is_not_judged(engine):
     assert MONEY_BUY_NOTE not in plan_next_action(state, PlanConfig(objective="purchase"), engine).limitations
     no_buy = plan_next_action(snap(phase="buy", coins=3, buys=0), engine=engine)  # no Buy can appear in any line
     assert MONEY_BUY_NOTE not in no_buy.limitations
+
+
+# ---------------------------------------------------------------- horizon hands:N, future_money, ties
+
+def turn_one(**overrides):
+    # Turn 1: owned 7 Copper + 3 Estate, discard empty -> draw pile = owned - hand - play.
+    player = dict(owned_cards={"Copper": 7, "Estate": 3}, discard_count=0)
+    player.update(overrides)
+    return snap(phase="buy", **player)
+
+
+def turn_one_treasures_played():
+    # Hand Estate, 4 Coppers in play ($4) -> draw pile {Copper 3, Estate 2}.
+    return turn_one(hand=["Estate"], in_play=["Copper"] * 4, coins=4)
+
+
+def test_hands_2_future_money_turn_one_buy_silver_by_hand(engine):
+    # Clean-up: hand + play (+ bought card) -> discard {Copper 4, Estate 1 (+ Silver)}.
+    # Hand 1 = the whole 5-card draw pile {Copper 3, Estate 2}: $3 for certain, no reshuffle.
+    # Hand 1's Clean-up -> discard {Copper 7, Estate 3 (+ Silver)}; the draw pile is empty -> reshuffle, draw 5.
+    #   Buy Silver: 11 cards, E[$] = 5 * (7*1 + 1*2) / 11 = 45/11;
+    #               P($>=5) = [C(7,3)C(3,1) + C(7,4)  (Silver + >=3 Coppers)  +  C(7,5)  (5 Coppers)] / C(11,5)
+    #                       = (105 + 35 + 21) / 462 = 23/66.
+    #   Nothing:    10 cards, E[$] = 5 * 7/10 = 7/2;  P($>=5) = C(7,5) / C(10,5) = 21/252 = 1/12.
+    # future_money = hand 1 + hand 2: 3 + 45/11 = 78/11 vs 3 + 7/2 = 13/2.
+    cfg = PlanConfig(objective="future_money", horizon="hands:2", top_outcomes=50)
+    res = compare_actions(turn_one_treasures_played(), [EndTurn(), Buy("Silver")], cfg, engine)
+    assert res.horizon == "hands:2" and res.objective == "future_money" and not res.tie
+    silver, nothing = res.candidates
+    assert silver.action_key == "Buy Silver" and nothing.action_key == "End turn (Clean-up)"
+    assert silver.expected_value == pytest.approx(78 / 11) and nothing.expected_value == pytest.approx(13 / 2)
+    assert silver.expected_value > nothing.expected_value
+    assert silver.value_provenance == "expected" and silver.method == "exact"
+    for c in (silver, nothing):
+        h1, h2 = c.projected_hands
+        assert h1["hand"] == 1 and h1["expected_coins_exact"] == "3" and h1["p_at_least_5_exact"] == "0"
+        assert h1["provenance"] == "exact" and h1["p_lower_bound"] == 0
+        # hand 1 is deterministic: every leaf of the (fully shown) distribution has the same $3 first hand
+        assert c.other_probability == pytest.approx(0.0)
+        assert {o.metrics["hand_coins"][0] for o in c.outcome_distribution} == {3}
+    assert Fraction(silver.projected_hands[1]["expected_coins_exact"]) == Fraction(45, 11)
+    assert Fraction(silver.projected_hands[1]["p_at_least_5_exact"]) == Fraction(23, 66)
+    assert Fraction(nothing.projected_hands[1]["expected_coins_exact"]) == Fraction(7, 2)
+    assert Fraction(nothing.projected_hands[1]["p_at_least_5_exact"]) == Fraction(1, 12)
+    assert silver.projected_hands[1]["expected_coins"] == pytest.approx(45 / 11)
+    assert any("hand 2 E[$]=4.09, P($>=5)=0.35" in s for s in silver.explanation)
+    assert any("(after reshuffle)" in step and step.startswith("hand 2:") for step in silver.principal_line)
+    d = silver.to_dict()
+    assert d["projected_hands"][1]["p_at_least_5"] == pytest.approx(23 / 66)
+    json.dumps(res.to_dict())
+    # The planner itself buys Silver with $4 under future_money (Silver is the best $ per card it can afford).
+    plan = plan_next_action(turn_one_treasures_played(), cfg, engine)
+    assert plan.recommended.action_key == "Buy Silver" and not plan.tie
+
+
+def test_hands_2_is_consistent_with_hands_1(engine):
+    # reshuffle-style state: draw pile 2 Estates, discard 1 Copper, $6 in play (see the next_hand_money test above).
+    state = snap(phase="buy", in_play=["Silver", "Silver", "Copper", "Copper"], coins=6,
+                 draw_pile={"composition": {"Estate": 2}}, discard_pile={"composition": {"Copper": 1}})
+    actions = [Buy("Gold"), Buy("Silver"), EndTurn()]
+    one = compare_actions(state, actions, PlanConfig(objective="future_money", horizon="hands:1"), engine)
+    alias = compare_actions(state, actions, PlanConfig(objective="future_money", horizon="next_hand"), engine)
+    nh = compare_actions(state, actions, PlanConfig(objective="next_hand_money", horizon="hands:2"), engine)
+    two = compare_actions(state, actions, PlanConfig(objective="future_money", horizon="hands:2"), engine)
+    v = lambda res: {c.action_key: c.expected_value for c in res.candidates}  # noqa: E731
+    hands = lambda res: {c.action_key: c.projected_hands for c in res.candidates}  # noqa: E731
+    assert v(one) == v(alias) == v(nh)                      # first projected hand, whichever way it is asked
+    assert v(one)["Buy Gold"] == pytest.approx(5.0) and v(one)["End turn (Clean-up)"] == pytest.approx(21 / 5)
+    assert hands(one) == hands(alias)
+    for key in v(one):
+        h1 = hands(one)[key][0]
+        assert hands(two)[key][0] == h1 and hands(nh)[key][0] == h1   # hand 1 does not depend on the horizon
+        assert len(hands(two)[key]) == 2
+        assert v(two)[key] == pytest.approx(sum(h["expected_coins"] for h in hands(two)[key]))
+        assert v(two)[key] > v(one)[key]
+
+
+def test_projected_cleanup_conserves_cards_and_reshuffles_only_when_required(engine):
+    from card_game_engine.games.dominion.planning import DominionPlanningModel, PlanNode, get_objective
+
+    state = turn_one_treasures_played()
+    root = PlanNode(from_game_state(state, engine))
+    model = DominionPlanningModel(engine, get_objective("future_money"), "hands:3", root)
+    end = model.apply(root, EndTurn())
+    total = card_totals(end.ps)
+    (p, first, label), = model.exact_outcomes(end, 200)        # hand 1: the whole draw pile, no reshuffle
+    assert p == 1 and "reshuffle" not in label and first.ps.projected == (("Copper",) * 3 + ("Estate",) * 2,)
+    assert first.ps.next_hand is None and first.ps.game.turn.pending_draws == 5 and not model.is_terminal(first)
+    assert first.ps.discard.counter == {"Copper": 7, "Estate": 3} and first.ps.draw.size == 0
+    assert card_totals(first.ps) == total
+    outs = model.exact_outcomes(first, 200)
+    assert sum(o[0] for o in outs) == 1 and all("(after reshuffle)" in o[2] for o in outs)
+    for _, child, _ in outs:                                   # hand 2 drawn and cleaned up; hand 3 pending
+        assert len(child.ps.projected) == 2 and card_totals(child.ps) == total
+        # hand 3 comes from the 5 cards left after hand 2: no further reshuffle needed
+        assert child.ps.draw.size == 5 and child.ps.discard.size == 5
+    with pytest.raises(ValueError):
+        simulate_projected_cleanup(end.ps, engine)              # hand not drawn yet
+
+
+def test_future_money_sampling_fallback_is_reproducible(engine):
+    cfg = PlanConfig(objective="future_money", horizon="hands:2", max_outcomes_per_chance=1, samples_per_chance=8,
+                     seed=11)
+    state = turn_one_treasures_played()
+    a = compare_actions(state, [Buy("Silver"), EndTurn()], cfg, engine)
+    b = compare_actions(state, [Buy("Silver"), EndTurn()], cfg, engine)
+    assert a.to_dict() == b.to_dict()
+    for c in a.candidates:
+        # hand 1 (the whole 5-card pile) has a single outcome and stays exact; hand 2 is sampled -> mixed
+        assert c.method == "mixed" and c.value_provenance == "monte_carlo" and c.stderr is not None
+        assert c.distribution_method == "monte_carlo"
+        assert [h["provenance"] for h in c.projected_hands] == ["monte_carlo", "monte_carlo"]
+        assert c.projected_hands[0]["expected_coins"] == pytest.approx(3.0)  # hand 1 is $3 in every sample
+        assert c.projected_hands[1]["expected_coins_exact"] is None
+    assert a.stats["sampled_chance_nodes"] > 0
+    assert any("sampled" in s and "seed 11" in s for s in a.limitations)
+    other = compare_actions(state, [Buy("Silver"), EndTurn()], PlanConfig(**{**cfg.to_dict(), "seed": 12}), engine)
+    assert other.to_dict() != a.to_dict()
+
+
+def test_future_money_unknown_cards_are_lower_bounds(engine):
+    # Draw pile = 5 Coppers, discard size known but contents unknown (3 cards): hand 1 is exactly $5,
+    # hand 2 reshuffles the discard ({4 played Coppers, ...}) together with 3 unknown cards -> lower bound.
+    state = snap(phase="buy", in_play=["Copper"] * 4, coins=4, draw_pile={"composition": {"Copper": 5}},
+                 discard_count=3)
+    res = compare_actions(state, [EndTurn()], PlanConfig(objective="future_money", horizon="hands:2"), engine)
+    c = res.candidates[0]
+    h1, h2 = c.projected_hands
+    assert h1["provenance"] == "exact" and h1["expected_coins"] == pytest.approx(5.0)
+    assert h2["provenance"] == "lower_bound" and h2["p_lower_bound"] > 0
+    assert c.value_provenance == "lower_bound"
+    assert any("hand 2 E[$] >= " in s for s in c.explanation)
+
+
+def test_horizon_and_future_objective_validation(engine):
+    assert [projected_hand_count(h) for h in ("turn", "next_hand", "hands:1", "hands:4")] == [0, 1, 1, 4]
+    for bad in ("hands:0", "hands:5", "hands:x", "hands", "game"):
+        with pytest.raises(ValueError, match="hands:<N>"):
+            PlanConfig(horizon=bad)
+    cfg = PlanConfig(objective="future_money", horizon="hands:3")
+    assert PlanConfig.from_dict(cfg.to_dict()) == cfg
+    state = turn_one(hand=["Copper"] * 4 + ["Estate"])
+    with pytest.raises(ValueError, match="future_money.*next_hand"):
+        plan_next_action(state, PlanConfig(objective="future_money", horizon="turn"), engine)
+    # default horizon of the future objectives is next_hand (= hands:1)
+    assert plan_next_action(state, PlanConfig(objective="future_money"), engine).horizon == "next_hand"
+
+
+def test_tie_is_reported_not_presented_as_better(engine):
+    # Turn 1 Buy phase, hand 4 Copper + Estate, draw pile {Copper 3, Estate 2}: the next hand is that whole pile
+    # whatever is done now -> every candidate has E[next-hand $] = 3: a tie.
+    state = turn_one(hand=["Copper"] * 4 + ["Estate"])
+    result = plan_next_action(state, PlanConfig(objective="next_hand_money", horizon="next_hand"), engine)
+    assert result.tie is True
+    assert all(c.expected_value == pytest.approx(3.0) for c in all_candidates(result))
+    assert sorted(result.tied_actions) == sorted(c.action["label"] for c in all_candidates(result))
+    assert result.recommended is not None                      # kept for API stability, flagged by ``tie``
+    assert result.explanation[0].startswith("TIE: no difference under objective next_hand_money")
+    assert "beyond this objective/horizon" in result.explanation[0]
+    assert not any(s.startswith("Recommended ") for s in result.explanation)
+    d = result.to_dict()
+    assert d["tie"] is True and d["tied_actions"] == result.tied_actions
+    json.dumps(d)
+    res = compare_actions(state, None, PlanConfig(objective="next_hand_money"), engine)
+    assert res.tie and set(res.tied_actions) == {c.action_key for c in res.candidates if c.legal}
+    assert any("no difference under objective next_hand_money" in n for n in res.difference_notes)
+    assert res.to_dict()["tie"] is True
+    # No tie: a real difference is still reported as one.
+    better = plan_next_action(village_smithy(), engine=engine)
+    assert better.tie is False and better.tied_actions == []
+    assert better.explanation[0].startswith("Recommended Play Village")
+
+
+def test_equal_lower_bounds_are_not_reported_as_a_tie(engine):
+    # Unknown draw pile: Play Village and Play Smithy both show E[$] >= 2 (drawn cards count $0). The true
+    # values may differ, so this is "not conclusive", never "no difference under the objective".
+    state = snap(hand=["Village", "Smithy", "Copper", "Copper"], deck_count=6, discard_count=4)
+    result = plan_next_action(state, PlanConfig(objective="money"), engine)
+    vals = by_label(all_candidates(result))
+    assert vals["Play Village"].expected_value == vals["Play Smithy"].expected_value
+    assert vals["Play Village"].value_provenance == "lower_bound"
+    assert result.tie is False and result.tied_actions == []
+    assert not any(s.startswith("TIE") for s in result.explanation)
+    assert any(s.startswith("Not conclusive") for s in result.explanation)
+    res = compare_actions(state, None, PlanConfig(objective="money"), engine)
+    assert res.tie is False and any(n.startswith("Not conclusive") for n in res.difference_notes)
+
+
+def test_budget_cut_projection_is_a_lower_bound(engine):
+    # A tiny node budget cannot project 3 hands: hands that were not reached count $0 -> labelled lower bound.
+    cfg = PlanConfig(objective="future_money", horizon="hands:3", max_nodes=6)
+    res = compare_actions(turn_one_treasures_played(), [Buy("Silver"), EndTurn()], cfg, engine)
+    assert all(c.truncated and c.value_provenance == "lower_bound" for c in res.candidates)
+    assert any("node budget cut off" in s for c in res.candidates for s in c.explanation)
+    assert any("Not conclusive" in n for n in res.difference_notes) or res.tie

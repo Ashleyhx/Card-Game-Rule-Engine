@@ -376,3 +376,46 @@ def test_python_m_entry_point_runs_plan():
                            "stranded_draw_vs_money", "--json"], capture_output=True, text=True, env=env, timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["recommended"]["action_key"] == "Play Militia"
+
+
+def _turn_one_snapshot(tmp_path, **player):
+    snap = {"num_players": 2, "kingdom": ["Cellar", "Market", "Merchant", "Militia", "Mine", "Moat",
+                                          "Remodel", "Smithy", "Village", "Workshop"],
+            "player": {"phase": "buy", "owned_cards": {"Copper": 7, "Estate": 3}, "discard_count": 0, **player}}
+    f = tmp_path / "turn1.json"
+    f.write_text(json.dumps(snap))
+    return str(f)
+
+
+def test_plan_horizon_hands_and_future_money(capsys, tmp_path):
+    f = _turn_one_snapshot(tmp_path, hand=["Estate"], in_play=["Copper"] * 4, coins=4)
+    code, out, _ = run(capsys, "compare", f, "--horizon", "hands:2", "--objective", "future_money", "--json",
+                       "--actions", "Buy Silver", "End turn (Clean-up)")
+    data = json.loads(out)
+    assert code == 0 and data["horizon"] == "hands:2" and data["objective"] == "future_money"
+    silver = data["candidates"][0]
+    assert silver["action_key"] == "Buy Silver" and silver["expected_value"] == pytest.approx(78 / 11)
+    assert [h["expected_coins"] for h in silver["projected_hands"]] == [pytest.approx(3.0), pytest.approx(45 / 11)]
+    code, out, _ = run(capsys, "plan", f, "--horizon", "hands:2", "--objective", "future_money")
+    assert code == 0 and ">> RECOMMENDED: Buy Silver" in out and "Horizon: hands:2" in out
+    assert "Projected hands" in out and "hand 2: E[$] = 4.09, P($>=5) = 0.35" in out
+    code, _, err = run(capsys, "plan", f, "--horizon", "hands:9")
+    assert code == 2 and "hands:<N>" in err
+
+
+def test_plan_and_compare_print_tie(capsys, tmp_path):
+    f = _turn_one_snapshot(tmp_path, hand=["Copper"] * 4 + ["Estate"])
+    code, out, _ = run(capsys, "plan", f, "--horizon", "next_hand", "--objective", "next_hand_money")
+    assert code == 0 and ">> TIE under objective next_hand_money" in out
+    assert "NOT better" in out and ">> RECOMMENDED" not in out
+    code, out, _ = run(capsys, "plan", f, "--horizon", "next_hand", "--objective", "next_hand_money", "--json")
+    data = json.loads(out)
+    assert data["tie"] is True and data["recommended"] is not None and len(data["tied_actions"]) >= 2
+    code, out, _ = run(capsys, "compare", f, "--objective", "next_hand_money")
+    assert code == 0 and ">> TIE under objective next_hand_money" in out
+    # compare-all collapses single Play-Treasure actions into Play all Treasures
+    code, out, _ = run(capsys, "compare", f, "--json")
+    keys = [c["action_key"] for c in json.loads(out)["candidates"]]
+    assert "Play all Treasures" in keys and "Play Copper" not in keys
+    code, out, _ = run(capsys, "compare", f, "--json", "--actions", "Play Copper")
+    assert code == 0 and [c["action_key"] for c in json.loads(out)["candidates"]] == ["Play Copper"]

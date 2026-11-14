@@ -1,4 +1,4 @@
-"""Probabilistic lookahead planner for one Dominion turn (optionally up to the next hand).
+"""Probabilistic lookahead planner for one Dominion turn (optionally projecting future hands).
 
 :class:`DominionPlanningModel` exposes planning states to the game-agnostic
 ``core.search.expectimax``:
@@ -11,8 +11,14 @@
 * a state with pending draws is a chance node over the exact draw outcomes
   (``enumerate_draws``), or sampled (``sample_draw``) when there are too many;
 * leaves: the turn ended (horizon ``turn``), the next hand was drawn (horizon
-  ``next_hand``), a planning boundary (manual choice / unknown draw pile), or no legal
-  actions. Depth and node budgets cut the search off earlier; such leaves are flagged.
+  ``next_hand`` = ``hands:1``) or the N-th projected hand was drawn (horizon ``hands:N``),
+  a planning boundary (manual choice / unknown draw pile), or no legal actions. Depth and
+  node budgets cut the search off earlier; such leaves are flagged.
+* ``hands:N``: after the current turn, N future start-of-turn hands are projected with no
+  decisions in future turns: each projected hand is a chance node (exact grouped draw
+  enumeration, or sampling), then goes to the discard pile at its Clean-up
+  (``simulate_projected_cleanup``) before the next one is drawn, reshuffling only when the
+  rules require it. Per projected hand, E[$] and P(hand >= $5) are reported.
 
 For each root candidate a second pass follows the planner's own decisions (argmax with
 the same tie-breaking as the search) and records the distribution of leaf outcomes, so
@@ -20,6 +26,10 @@ outcome probabilities and threshold probabilities are consistent with the expect
 value. The pass is exact when every chance node it meets is enumerated, otherwise it is
 a Monte Carlo estimate (labelled ``monte_carlo``); it has its own node budget and is
 skipped (with a limitation note) if that runs out.
+
+Ties: when the two best candidates have equal values under the objective (within
+``TIE_TOLERANCE``) the result says so (``tie`` / ``tied_actions``); the first listed action
+is then only the documented tie-break, not a better action.
 
 Honesty labels: when a candidate can reach unknown cards ("?" in hand, or an
 ``unknown_draw_pile`` boundary) its value and threshold probabilities are labelled
@@ -39,16 +49,22 @@ from typing import Any, Hashable
 from ....core.search import ActionValue, SearchConfig, SearchStats, expectimax
 from ..rules.actions import Action, Buy, EndTurn, PlayAllTreasures, PlayTreasure, action_from_dict, action_to_dict
 from ..rules.engine import DominionRuleEngine
-from ..rules.state import PLANNING_HORIZONS, GameState
+from ..rules.state import MAX_PROJECTED_HANDS, GameState, projected_hand_count
 from ..rules.zones import derive_zone_knowledge
 from .draws import DrawOutcome, count_draw_outcomes, enumerate_draws, sample_draw
 from .evaluation import (
-    METRIC_PROVENANCE, TIE_BREAK_WEIGHT, MoneyObjective, NextHandMoneyObjective, Objective, get_objective, leaf_label,
-    leaf_metrics, tie_break, value_is_lower_bound,
+    METRIC_PROVENANCE, TIE_BREAK_WEIGHT, FutureMoneyObjective, MoneyObjective, NextHandMoneyObjective, Objective,
+    get_objective, leaf_label, leaf_metrics, tie_break, value_is_lower_bound,
 )
-from .transitions import PlanState, from_game_state, pending_draws, simulate_action, simulate_draw, simulate_end_turn
+from .transitions import (
+    PlanState, from_game_state, pending_draws, simulate_action, simulate_draw, simulate_end_turn,
+    simulate_projected_cleanup,
+)
 
 THRESHOLDS = (5, 6, 8)
+HAND_THRESHOLD = 5            # per projected hand: P(hand >= $5)
+TIE_TOLERANCE = 1e-9
+FUTURE_OBJECTIVES = (NextHandMoneyObjective, FutureMoneyObjective)  # need a horizon that projects hands
 OPPONENTS_NOT_MODELLED = ("Opponent effects are not modelled: attacks only change opponents' hands (cleared), "
                           "and opponents' turns are not simulated.")
 MONEY_BUY_NOTE = ("The 'money' objective does not judge which card to buy (coins generated do not depend on it; the "
@@ -64,7 +80,7 @@ INCONCLUSIVE = ("lower_bound", "partial")
 @dataclass
 class PlanConfig:
     """Planner settings. ``horizon=None`` means: the snapshot's ``planning.horizon``, else ``turn``
-    (``next_hand`` for the ``next_hand_money`` objective)."""
+    (``next_hand`` for the ``next_hand_money`` and ``future_money`` objectives)."""
 
     objective: str = "money"
     horizon: str | None = None
@@ -77,8 +93,8 @@ class PlanConfig:
 
     def __post_init__(self) -> None:
         get_objective(self.objective)  # raises ValueError for an unknown name
-        if self.horizon is not None and self.horizon not in PLANNING_HORIZONS:
-            raise ValueError(f"horizon must be one of {', '.join(PLANNING_HORIZONS)} (got {self.horizon!r})")
+        if self.horizon is not None:
+            projected_hand_count(self.horizon)  # raises ValueError for an unknown horizon
         if self.top_outcomes < 1:
             raise ValueError("top_outcomes must be >= 1")
         self.search_config()  # validates depth, nodes, outcomes and samples
@@ -126,6 +142,7 @@ class DominionPlanningModel:
         self.engine = engine
         self.objective = objective
         self.horizon = horizon
+        self.hands = projected_hand_count(horizon)
         self.root = root
         self.root_actions = root_actions  # restricts the root's decisions (compare_actions)
         self._metrics: dict[Hashable, dict[str, Any]] = {}
@@ -154,12 +171,17 @@ class DominionPlanningModel:
         return not self.is_terminal(s) and pending_draws(s.ps) > 0
 
     def _child(self, s: PlanNode, o: DrawOutcome) -> tuple[PlanNode, str]:
-        label = ("next hand: " if s.ps.turn_ended else "draw ") + (", ".join(o.cards) or "nothing")
+        index = len(s.ps.projected) + 1  # which projected hand is being drawn (once the turn ended)
+        prefix = "draw " if not s.ps.turn_ended else "next hand: " if index == 1 else f"hand {index}: "
+        label = prefix + (", ".join(o.cards) or "nothing")
         if o.reshuffled:
             label += " (after reshuffle)"
         if o.boundary:
             label += f" [{o.boundary}: {o.owed} card(s) owed]"
-        return PlanNode(simulate_draw(s.ps, o, self.engine), s.turn), label
+        ps = simulate_draw(s.ps, o, self.engine)
+        if ps.turn_ended and ps.boundary is None and not pending_draws(ps) and index < self.hands:
+            ps = simulate_projected_cleanup(ps, self.engine)  # no decisions in future turns
+        return PlanNode(ps, s.turn), label
 
     def exact_outcomes(self, s: PlanNode, max_outcomes: int) -> list[tuple[Fraction, PlanNode, str]] | None:
         ps, n = s.ps, pending_draws(s.ps)
@@ -179,7 +201,7 @@ class DominionPlanningModel:
         ps = s.ps
         if ps.boundary is not None:
             return True
-        return ps.turn_ended and (self.horizon == "turn" or pending_draws(ps) == 0)
+        return ps.turn_ended and (self.hands == 0 or pending_draws(ps) == 0)
 
     def metrics(self, s: PlanNode) -> dict[str, Any]:
         k = s.key()
@@ -314,6 +336,10 @@ class CandidateEvaluation:
     distribution_method: str | None = None  # "exact" | "monte_carlo" | None (not computed)
     threshold_probabilities: dict[int, float] = field(default_factory=dict)
     threshold_provenance: str | None = None  # "exact" | "monte_carlo" | "lower_bound" | "partial" | None
+    # One dict per projected hand (horizon next_hand / hands:N): hand, expected_coins, p_at_least_5, provenance
+    # (as threshold_provenance), p_lower_bound, and expected_coins_exact / p_at_least_5_exact (fraction strings,
+    # only when the distribution is exact).
+    projected_hands: list[dict[str, Any]] = field(default_factory=list)
     boundaries: dict[str, float] = field(default_factory=dict)
     flags: dict[str, float] = field(default_factory=dict)
     principal_line: list[str] = field(default_factory=list)
@@ -344,6 +370,8 @@ class PlanResult:
     limitations: list[str]
     explanation: list[str]
     blocked: list[str] = field(default_factory=list)
+    tie: bool = False              # best and second-best have equal value: ``recommended`` is only the tie-break
+    tied_actions: list[str] = field(default_factory=list)  # labels of the candidates tied with the best
 
     def to_dict(self) -> dict[str, Any]:
         d = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -362,6 +390,8 @@ class ComparisonResult:
     difference_notes: list[str]
     stats: dict[str, Any]
     limitations: list[str]
+    tie: bool = False              # the first two legal candidates have equal value under the objective
+    tied_actions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -388,10 +418,11 @@ def _setup(state: GameState, config: PlanConfig | None, engine: DominionRuleEngi
     engine = engine or DominionRuleEngine()
     cfg = config or PlanConfig()
     objective = get_objective(cfg.objective, state, engine)
-    default = "next_hand" if isinstance(objective, NextHandMoneyObjective) else "turn"
+    default = "next_hand" if isinstance(objective, FUTURE_OBJECTIVES) else "turn"
     horizon = cfg.horizon or state.planning_horizon or default
-    if isinstance(objective, NextHandMoneyObjective) and horizon != "next_hand":
-        raise ValueError("The next_hand_money objective needs horizon 'next_hand'.")
+    if isinstance(objective, FUTURE_OBJECTIVES) and projected_hand_count(horizon) == 0:
+        raise ValueError(f"The {objective.name} objective needs horizon 'next_hand' or 'hands:N' "
+                         f"(1 <= N <= {MAX_PROJECTED_HANDS}).")
     draw, _, notes = derive_zone_knowledge(state, engine.registry)
     root = PlanNode(from_game_state(state, engine))
     return _Setup(engine, cfg, objective, horizon, root, draw.level.value, notes)
@@ -413,6 +444,48 @@ def _value_text(c: CandidateEvaluation, name: str = "") -> str:
 def _thresholds_text(c: CandidateEvaluation) -> str:
     op = " >= " if c.threshold_provenance == "lower_bound" else "="
     return ", ".join(f"P($>={t}){op}{p:.2f}" for t, p in c.threshold_probabilities.items())
+
+
+def _hands_text(c: CandidateEvaluation) -> str:
+    parts = []
+    for h in c.projected_hands:
+        op = " >= " if h["provenance"] == "lower_bound" else "="
+        parts.append(f"hand {h['hand']} E[$]{op}{h['expected_coins']:.2f}, "
+                     f"P($>={HAND_THRESHOLD}){op}{h['p_at_least_5']:.2f} ({h['provenance']})")
+    return "; ".join(parts)
+
+
+def _hand_stats(groups: list, n_hands: int, prov: str, flags: dict[str, float]) -> list[dict[str, Any]]:
+    """E[$] and P(hand >= $5) per projected hand from the grouped leaf distribution.
+
+    A leaf that did not reach hand i (boundary or cut-off) contributes $0 to it, which makes
+    that hand's numbers lower bounds (``p_lower_bound`` > 0), like owed or unknown cards.
+    """
+    out = []
+    for i in range(n_hands):
+        expected = p_five = p_lower = Fraction(0)
+        for _, (p, m) in groups:
+            coins = m.get("hand_coins", [])
+            if i < len(coins):
+                expected += p * coins[i]
+                p_five += p if coins[i] >= HAND_THRESHOLD else 0
+                p_lower += p if m["hand_coins_is_lower_bound"][i] else 0
+            else:
+                p_lower += p
+        if flags.get("p_manual_boundary"):
+            provenance = "partial"
+        elif p_lower:
+            provenance = "lower_bound"
+        else:
+            provenance = prov
+        exact = prov == "exact"
+        out.append({
+            "hand": i + 1, "expected_coins": float(expected), "p_at_least_5": float(p_five),
+            "provenance": provenance, "p_lower_bound": float(p_lower),
+            "expected_coins_exact": str(expected) if exact else None,
+            "p_at_least_5_exact": str(p_five) if exact else None,
+        })
+    return out
 
 
 def _line_has_buy(c: CandidateEvaluation) -> bool:
@@ -484,11 +557,13 @@ def _evaluate_candidate(model: DominionPlanningModel, su: _Setup, av: ActionValu
             c.threshold_provenance = "lower_bound"
         else:
             c.threshold_provenance = prov
+        c.projected_hands = _hand_stats(groups, model.hands, prov, c.flags)
     if objective.provenance == "heuristic":
         c.value_provenance = "heuristic"
     elif c.flags.get("p_manual_boundary"):
         c.value_provenance = "partial"
-    elif c.flags.get("p_value_lower_bound"):
+    elif c.flags.get("p_value_lower_bound") or (av.truncated and isinstance(objective, FUTURE_OBJECTIVES)):
+        # A budget cut-off before the projection ends scores the hands it did not reach as $0.
         c.value_provenance = "lower_bound"
     elif av.method != "exact":
         c.value_provenance = "monte_carlo"
@@ -506,15 +581,20 @@ _THRESHOLD_LABELS = {
 
 def _candidate_explanation(c: CandidateEvaluation, objective: Objective) -> list[str]:
     out = [f"{c.action['label']}: {_value_text(c, objective.value_name)} ({c.value_provenance})."]
-    if c.value_provenance == "lower_bound":
+    if c.value_provenance == "lower_bound" and c.flags.get("p_value_lower_bound"):
         out.append(f"This value is a lower bound: with probability {c.flags['p_value_lower_bound']:.2f} the line "
                    "reaches cards of unknown identity, which are counted as $0.")
+    if c.value_provenance == "lower_bound" and c.truncated:
+        out.append("This value is a lower bound: the node budget cut off part of the search, and projected hands "
+                   "it did not reach count $0 (raise --nodes or shorten the horizon).")
     elif c.value_provenance == "partial":
         out.append(f"This value is partial: with probability {c.flags['p_manual_boundary']:.2f} the line reaches a "
                    "player choice that is not modelled; it is evaluated as if that choice did nothing.")
     if c.distribution_method:
         label = _THRESHOLD_LABELS.get(c.threshold_provenance, c.threshold_provenance)
         out.append(f"Threshold probabilities ({label}): {_thresholds_text(c)}.")
+        if c.projected_hands:
+            out.append(f"Projected hands (no decisions in future turns): {_hands_text(c)}.")
         top = c.outcome_distribution[0]
         out.append(f"Most likely outcome: {top.label} (p={top.probability:.2f}).")
     else:
@@ -530,6 +610,28 @@ def _search(su: _Setup, root_actions: list[Action] | None) -> tuple[list[Candida
     model = DominionPlanningModel(su.engine, su.objective, su.horizon, su.root, root_actions)
     values, stats = expectimax(model, su.root, su.cfg.search_config())
     return [_evaluate_candidate(model, su, av, len(values)) for av in values], stats
+
+
+def _tied(cands: list[CandidateEvaluation]) -> list[CandidateEvaluation]:
+    """Candidates whose value equals the best one's (within TIE_TOLERANCE), if the second-best does; else [].
+
+    Equal values that are only lower bounds or partial are not a tie (the true values may differ); the
+    "Not conclusive" notes report those instead.
+    """
+    valued = [c for c in cands if c.legal and c.expected_value is not None]
+    if len(valued) < 2 or abs(valued[0].expected_value - valued[1].expected_value) > TIE_TOLERANCE:
+        return []
+    tied = [c for c in valued if abs(valued[0].expected_value - c.expected_value) <= TIE_TOLERANCE]
+    return [] if any(c.value_provenance in INCONCLUSIVE for c in tied) else tied
+
+
+def _tie_note(tied: list[CandidateEvaluation], objective: Objective, horizon: str) -> str:
+    labels = ", ".join(c.action["label"] for c in tied)
+    return (f"TIE: no difference under objective {objective.name} (horizon {horizon}) between {labels} "
+            f"({_value_text(tied[0], objective.value_name)}); the decision is beyond this objective/horizon "
+            f"(try another objective or a longer horizon). {tied[0].action['label']} is listed first only by the "
+            "documented tie-break (more coins generated, then more cards drawn, more coins spent, more Buys kept), "
+            "not because it is better.")
 
 
 def _overall_method(cands: list[CandidateEvaluation]) -> str:
@@ -600,6 +702,7 @@ def plan_next_action(state: GameState, config: PlanConfig | None = None,
         explanation = _plan_explanation(su, cands)
     legal = su.engine.legal_actions(state)
     recommended = cands[0] if cands else None
+    tied = _tied(cands)
     if recommended is not None and action_from_dict(recommended.action) not in legal:
         raise RuntimeError(f"planner recommended an illegal action: {recommended.action}")
     return PlanResult(
@@ -607,7 +710,7 @@ def plan_next_action(state: GameState, config: PlanConfig | None = None,
         objective_description=su.objective.describe(), value_name=su.objective.value_name, horizon=su.horizon,
         method=_overall_method(cands), information_level=su.level, information_notes=list(su.notes),
         stats=stats.to_dict(), config=su.cfg.to_dict(), limitations=_limitations(su, cands, stats),
-        explanation=explanation, blocked=blocked,
+        explanation=explanation, blocked=blocked, tie=bool(tied), tied_actions=[c.action["label"] for c in tied],
     )
 
 
@@ -616,18 +719,21 @@ def _plan_explanation(su: _Setup, cands: list[CandidateEvaluation]) -> list[str]
         return ["No recommendation: there are no legal actions (the turn is over)."]
     best, vn = cands[0], su.objective.value_name
     out = []
+    tied = _tied(cands)
+    if tied:
+        out.append(_tie_note(tied, su.objective, su.horizon))
     if len(cands) > 1:
         nxt = cands[1]
         diff = (best.expected_value or 0.0) - (nxt.expected_value or 0.0)
         inconclusive = {best.value_provenance, nxt.value_provenance} & set(INCONCLUSIVE)
         shown = " on the shown values" if inconclusive else ""
-        out.append(f"Recommended {best.action['label']}: {_value_text(best, vn)} vs next best "
-                   f"{nxt.action['label']}: {_value_text(nxt)} (difference {diff:+.2f}{shown}).")
-        if abs(diff) < 1e-9:
-            out.append("Tied on the objective; broken by more coins generated, then more cards drawn, more coins "
-                       "spent and more Buys kept.")
+        if not tied:
+            out.append(f"Recommended {best.action['label']}: {_value_text(best, vn)} vs next best "
+                       f"{nxt.action['label']}: {_value_text(nxt)} (difference {diff:+.2f}{shown}).")
         if best.threshold_probabilities and nxt.threshold_probabilities:
             out.append(f"{best.action['label']}: {_thresholds_text(best)}; {nxt.action['label']}: {_thresholds_text(nxt)}.")
+        if best.projected_hands and nxt.projected_hands:
+            out.append(f"{best.action['label']}: {_hands_text(best)}. {nxt.action['label']}: {_hands_text(nxt)}.")
         out.extend(note for c in cands[1:] if (note := _inconclusive_note(best, c, vn)))
     else:
         out.append(f"Recommended {best.action['label']} (the only candidate): {_value_text(best, vn)}.")
@@ -637,17 +743,31 @@ def _plan_explanation(su: _Setup, cands: list[CandidateEvaluation]) -> list[str]
     return out
 
 
+def first_action_candidates(state: GameState, engine: DominionRuleEngine | None = None) -> list[Action]:
+    """Every legal first action, with individual Play-Treasure actions collapsed into Play-all-Treasures
+    (as the planner's own decisions do; no Buy pruning)."""
+    legal = list((engine or DominionRuleEngine()).legal_actions(state))
+    if any(isinstance(a, PlayAllTreasures) for a in legal):
+        legal = [a for a in legal if not isinstance(a, PlayTreasure)]
+    return legal
+
+
 def evaluate_action_sequences(state: GameState, config: PlanConfig | None = None,
                               engine: DominionRuleEngine | None = None) -> list[CandidateEvaluation]:
-    """Evaluate every legal first action (no root pruning), best first."""
-    engine = engine or DominionRuleEngine()
-    return compare_actions(state, list(engine.legal_actions(state)), config, engine).candidates
+    """Evaluate every legal first action (``first_action_candidates``), best first."""
+    return compare_actions(state, None, config, engine).candidates
 
 
-def compare_actions(state: GameState, candidates: list[Action | dict[str, Any]], config: PlanConfig | None = None,
-                    engine: DominionRuleEngine | None = None) -> ComparisonResult:
-    """Evaluate the given first actions; illegal ones are reported with the engine's reasons, not evaluated."""
+def compare_actions(state: GameState, candidates: list[Action | dict[str, Any]] | None = None,
+                    config: PlanConfig | None = None, engine: DominionRuleEngine | None = None) -> ComparisonResult:
+    """Evaluate the given first actions; illegal ones are reported with the engine's reasons, not evaluated.
+
+    ``candidates=None`` compares every legal first action (``first_action_candidates``); explicit
+    candidates may name a single Treasure.
+    """
     su = _setup(state, config, engine)
+    if candidates is None:
+        candidates = first_action_candidates(state, su.engine)
     legal: list[Action] = []
     illegal: list[CandidateEvaluation] = []
     for raw in candidates:
@@ -666,14 +786,23 @@ def compare_actions(state: GameState, candidates: list[Action | dict[str, Any]],
             legal.append(action)
     cands, stats = _search(su, legal) if legal else ([], SearchStats())
     notes = []
+    tied = _tied(cands)
+    if tied:
+        notes.append(_tie_note(tied, su.objective, su.horizon))
     if cands:
         best, vn = cands[0], su.objective.value_name
         for c in cands[1:]:
             diff = (best.expected_value or 0.0) - (c.expected_value or 0.0)
-            note = (f"{best.action['label']} ({_value_text(best, vn)}) vs {c.action['label']} "
-                    f"({_value_text(c)}): difference {diff:+.2f}")
+            if any(c is t for t in tied):
+                note = (f"{best.action['label']} ({_value_text(best, vn)}) vs {c.action['label']} "
+                        f"({_value_text(c)}): no difference under objective {su.objective.name}")
+            else:
+                note = (f"{best.action['label']} ({_value_text(best, vn)}) vs {c.action['label']} "
+                        f"({_value_text(c)}): difference {diff:+.2f}")
             if best.threshold_probabilities and c.threshold_probabilities:
                 note += f"; {_thresholds_text(best)} vs {_thresholds_text(c)}"
+            if best.projected_hands and c.projected_hands:
+                note += f"; {_hands_text(best)} vs {_hands_text(c)}"
             notes.append(note + ".")
             inconclusive = _inconclusive_note(best, c, vn)
             if inconclusive:
@@ -683,5 +812,5 @@ def compare_actions(state: GameState, candidates: list[Action | dict[str, Any]],
     return ComparisonResult(
         candidates=cands + illegal, objective=su.objective.name, value_name=su.objective.value_name,
         horizon=su.horizon, information_level=su.level, difference_notes=notes, stats=stats.to_dict(),
-        limitations=_limitations(su, cands, stats),
+        limitations=_limitations(su, cands, stats), tie=bool(tied), tied_actions=[c.action["label"] for c in tied],
     )

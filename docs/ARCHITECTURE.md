@@ -10,7 +10,8 @@ card_game_engine/
 │   ├── interfaces.py          RuleEngine, Policy, GameAction protocols; Transition; IllegalActionError;
 │   │                          GameDefinition (how a game plugs in)
 │   ├── registry.py            available_games(), get_game("dominion")
-│   └── search.py              generic expectimax + Monte Carlo with depth/node budgets (PlanningModel protocol)
+│   ├── search.py              generic expectimax + Monte Carlo with depth/node budgets (PlanningModel protocol)
+│   └── session.py             initialize_session(domain, config): dispatches to GameDefinition.initialize_session
 ├── cli.py                   `cardgame <game> <command>` - dispatches to each game's commands
 └── games/
     └── dominion/            GAME PLUGIN: Dominion 2E Base Set  (exposes GAME = GameDefinition)
@@ -31,16 +32,25 @@ card_game_engine/
         ├── planning/          LOOKAHEAD PLANNER (Phase 2) - expected values over exact draw outcomes
         │   ├── draws.py         exact grouped draw enumeration (hypergeometric) + seeded sampling
         │   ├── transitions.py   PlanState + pure simulate_* transitions (engine.apply + zone updates)
-        │   ├── evaluation.py    leaf metrics + objectives (money, threshold:N, next_hand_money, purchase)
+        │   ├── evaluation.py    leaf metrics + objectives (money, threshold:N, next_hand_money, future_money, purchase)
         │   └── planner.py       DominionPlanningModel; plan_next_action, evaluate_action_sequences, compare_actions
-        ├── cli/               `cardgame dominion ...` commands, interactive assistant, rendering
+        ├── inference/         SESSION TRACKING (Phase 2b) - belief about MY hidden zones across turns
+        │   ├── events.py        typed JSON events (ObserveHand, RecordDraw/Play/Purchase/Gain/Trash/Discard/Supply,
+        │   │                    EndTurnObservation); InconsistentObservation vs IllegalEvent
+        │   ├── belief.py        World (weighted hypothesis), BeliefState, exact conditioning, predictive draws
+        │   └── session.py       Session (config + event log, replayed); record/correct/remove/reset,
+        │                        infer_belief_state, predict_next_hand, to_game_state, plan_next_action
+        ├── cli/               `cardgame dominion ...` commands, interactive assistant, `session` verbs, rendering
         └── examples/          bundled snapshots
 ```
 
-Dependencies only point one way: `cli → policy → rules → data` and `cli → planning → rules`
-(`planning` also reads `policy` weights, only for the heuristic `purchase` objective), and every
-game depends on `core`. `core` imports no game (the registry loads games lazily by module path).
-A rule engine never imports a policy or the planner.
+Dependencies only point one way: `cli → policy → rules → data`, `cli → planning → rules` and
+`cli → inference → planning, rules` (`planning` also reads `policy` weights, only for the heuristic
+`purchase` objective), and every game depends on `core`. `core` imports no game (the registry loads
+games lazily by module path). A rule engine never imports a policy, the planner or `inference`;
+`planning` never imports `inference`. Shared vocabulary lives in the lower layer: e.g. the planning
+horizon names (`turn`, `next_hand`, `hands:N`) are validated by `rules.state.projected_hand_count`,
+used both by snapshots (`planning.horizon`) and by `PlanConfig`.
 
 ## Core contracts (`card_game_engine.core`)
 
@@ -125,14 +135,61 @@ The agent proposes, the engine checks (`engine.check` / `apply`), and the planne
 illegal candidates come back with the engine's reasons instead of a value, and a blocked state
 (pending draws, manual steps) gets no recommendation.
 
+## Session tracking and belief state (Phase 2b)
+
+`inference/` follows one real game from my seat. A `Session` is only a config and an event log; the
+`BeliefState` is a deterministic replay from the initial state (standard starting deck shuffled, or a
+partial snapshot via `derive_zone_knowledge`). Rules effects (play, buy, clean-up) go through
+`DominionRuleEngine`; draw mechanics and reshuffles come from `rules/zones.py` and `planning/draws.py`.
+
+- **Worlds.** Each `World` is one hypothesis about my draw pile, discard pile and hand, with an exact
+  `Fraction` weight (weights sum to 1). Inside a world the draw pile is still "known multiset in
+  uniformly random order", so one world stands for many orderings. An unobserved draw branches every
+  world by its grouped outcomes; an observation reweights by its exact likelihood and drops impossible
+  worlds (none left = `InconsistentObservation`). Identical worlds merge; beyond `max_worlds` the set
+  is collapsed to what is certain plus `"?"` cards (flagged).
+- **Incomplete vs inconsistent.** Contradictions raise and the session is unchanged; missing
+  information (unobserved draws, a snapshot start, Supply not tracked) becomes `flags`.
+- **Planner bridge.** `to_game_state` gives the planner one `GameState`: exact zones for a single
+  world, otherwise a conservative collapse where uncertain cards are `"?"` (documented approximation).
+
+How a future agent calls it (every result is JSON-serialisable):
+
+```python
+from card_game_engine.core.session import initialize_session          # generic: dispatches by game id
+from card_game_engine.games.dominion.inference import (
+    EndTurnObservation, InconsistentObservation, ObserveHand, RecordPurchase, Session,
+    plan_next_action, predict_next_hand, record_event)
+
+s = initialize_session("dominion", {"num_players": 2})                  # standard deck, opening hand pending
+s = record_event(s, ObserveHand(["Copper"] * 4 + ["Estate"]))           # returns a NEW Session
+s = record_event(s, RecordPurchase("Silver"))
+s = record_event(s, EndTurnObservation())
+pred = predict_next_hand(s).to_dict()          # {"deterministic": True, "hand": [3 Copper, 2 Estate], ...}
+try:
+    s = record_event(s, ObserveHand(["Estate"] * 5))
+except InconsistentObservation as e:          # the agent reports e.problem; s is unchanged
+    ...
+s = record_event(s, ObserveHand(pred["hand"]))  # the planner needs a known hand (else HandNotDetermined)
+plan = plan_next_action(s, {"horizon": "hands:2", "objective": "future_money"}).to_dict()
+s = Session.from_dict(s.to_dict())             # persist / restore: the log is replayed and re-validated
+```
+
+The CLI (`cardgame dominion session ...`, `cli/session_cli.py`) is a thin layer over this API: it
+stores `Session.to_dict()` in a file (atomic writes), parses card lists, and renders the results.
+It also presents a pending hand that the belief already determines as "Hand (deduced)" (the belief
+itself keeps the draw pending).
+
 ## How future phases plug in (not implemented yet)
 
 - **LLM tool-calling agent:** expose `get_game(id)`, `legal_actions`, `check`, `apply`,
-  `recommend`, `plan_next_action` and `compare_actions` as tools. Actions and planner results
+  `recommend`, `plan_next_action`, `compare_actions` and the session API (`initialize_session`,
+  `record_event`, `predict_next_hand`, session `plan_next_action`) as tools. Actions and planner results
   already serialise to JSON (`action_to_dict` / `action_from_dict`, `to_dict()`).
-- **Deeper multi-turn planning / opponent modelling:** extend the Dominion `PlanningModel`
-  (zone knowledge across turns, opponents' turns as chance or decision nodes); `core/search.py`
-  needs no changes.
+- **Exact belief-aware planning over mixtures:** search over the session's weighted worlds (chance
+  node over worlds, then the existing model) instead of the `"?"` approximation in `to_game_state`.
+- **Opponent modelling:** extend the Dominion `PlanningModel` (opponents' turns as chance or decision
+  nodes) and the session events; `core/search.py` needs no changes.
 - **Screenshot recognition / external game adapters:** produce a snapshot dict and pass it
   through `GameDefinition.parse_state` (+ the game's validation).
 - **General decision environments:** `parse_state` + `legal_actions` + `apply` already form

@@ -123,8 +123,9 @@ def cmd_compare(args, engine) -> int:
     if state is None:
         return EXIT_INVALID
     legal = engine.legal_actions(state)
-    # Without --actions this is evaluate_action_sequences(state): every legal first action, no root pruning.
-    candidates = _match_actions(args.actions, legal) if args.actions else list(legal)
+    # Without --actions this is evaluate_action_sequences(state): every legal first action, with single
+    # Play-Treasure actions collapsed into Play-all-Treasures (an explicit --actions label may still name one).
+    candidates = _match_actions(args.actions, legal) if args.actions else None
     result = compare_actions(state, candidates, cfg, engine)
     description = get_objective(cfg.objective, state, engine).describe()
     text = render_comparison(result, state, engine, cfg, description)
@@ -280,17 +281,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     def add_plan_args(sp):
         add_state_args(sp)
         sp.add_argument("--state", dest="state_path", metavar="PATH", help="Snapshot JSON file (alias of STATE)")
-        sp.add_argument("--objective", default="money",
-                        help="money (default) | purchase | threshold:N | next_hand_money")
-        sp.add_argument("--horizon", choices=("turn", "next_hand"),
-                        help="Plan to the end of the turn or until the next hand is drawn "
-                             "(default: snapshot's planning.horizon, else turn)")
-        sp.add_argument("--depth", type=int, default=8, help="Max decision steps (default 8)")
-        sp.add_argument("--nodes", type=int, default=20000, help="Node budget (default 20000)")
-        sp.add_argument("--samples", type=int, default=32,
-                        help="Monte Carlo samples per chance node that is too large to enumerate (default 32)")
-        sp.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default 0)")
-        sp.add_argument("--top", type=int, default=5, help="How many outcomes / alternatives to show (default 5)")
+        add_planner_flags(sp)
 
     p = sub.add_parser("plan", help="Recommend the next action by probabilistic lookahead (exact draw odds)")
     add_plan_args(p)
@@ -301,3 +292,23 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     cmp_.add_argument("--actions", nargs="+", metavar="LABEL",
                       help='Only these actions, by label (case-insensitive), e.g. --actions "Play Village" "Play Smithy"')
     cmp_.set_defaults(func=_run(cmd_compare))
+
+    from .session_cli import register_session_cli  # imports this module, so register it last
+
+    register_session_cli(sub)
+
+
+def add_planner_flags(sp) -> None:
+    """Planner options shared by ``plan``, ``compare`` and ``session plan``."""
+    sp.add_argument("--objective", default="money",
+                    help="money (default) | purchase | threshold:N | next_hand_money | future_money")
+    sp.add_argument("--horizon",
+                    help="turn | next_hand | hands:N (1-4): plan to the end of the turn, or also project the "
+                         "next N start-of-turn hands with no decisions in future turns (next_hand = hands:1; "
+                         "default: snapshot's planning.horizon, else turn)")
+    sp.add_argument("--depth", type=int, default=8, help="Max decision steps (default 8)")
+    sp.add_argument("--nodes", type=int, default=20000, help="Node budget (default 20000)")
+    sp.add_argument("--samples", type=int, default=32,
+                    help="Monte Carlo samples per chance node that is too large to enumerate (default 32)")
+    sp.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default 0)")
+    sp.add_argument("--top", type=int, default=5, help="How many outcomes / alternatives to show (default 5)")

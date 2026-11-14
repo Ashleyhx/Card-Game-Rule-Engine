@@ -133,8 +133,25 @@ def _thresholds(c: CandidateEvaluation) -> str:
     return f"{text}  ({c.threshold_provenance})"
 
 
+def _projected_hands(c: CandidateEvaluation, indent: str) -> list[str]:
+    lines = [f"{indent}Projected hands (no decisions in future turns):"] if c.projected_hands else []
+    for h in c.projected_hands:
+        op = ">= " if h["provenance"] == "lower_bound" else "= "
+        lines.append(f"{indent}  hand {h['hand']}: E[$] {op}{h['expected_coins']:.2f}, "
+                     f"P($>=5) {op}{h['p_at_least_5']:.2f}  ({h['provenance']})")
+    return lines
+
+
+def _tie_lines(tied: list[str], objective: str, value_name: str, best: CandidateEvaluation, horizon: str) -> list[str]:
+    return [f">> TIE under objective {objective} (horizon {horizon}): {', '.join(tied)}    "
+            f"{value_name} {plan_value(best)}",
+            "   No difference under this objective/horizon - the decision is beyond it (try another objective or a "
+            "longer horizon).",
+            f"   Listed first by tie-break only (NOT better): {best.action['label']}    {_tags(best)}"]
+
+
 def _candidate_details(c: CandidateEvaluation, indent: str = "  ") -> list[str]:
-    lines = [f"{indent}Threshold probabilities: {_thresholds(c)}"]
+    lines = [f"{indent}Threshold probabilities: {_thresholds(c)}"] + _projected_hands(c, indent)
     if c.outcome_distribution:
         lines.append(f"{indent}Top future outcomes ({c.distribution_method}):")
         lines += [f"{indent}  p={o.probability:.2f}  {o.label}" for o in c.outcome_distribution]
@@ -182,7 +199,10 @@ def render_plan(result: PlanResult, state: GameState, engine: DominionRuleEngine
     if best is None:
         lines += result.explanation
         return "\n".join(lines)
-    lines.append(f">> RECOMMENDED: {best.action['label']}    {result.value_name} {plan_value(best)} {_tags(best)}")
+    if result.tie:
+        lines += _tie_lines(result.tied_actions, result.objective, result.value_name, best, result.horizon)
+    else:
+        lines.append(f">> RECOMMENDED: {best.action['label']}    {result.value_name} {plan_value(best)} {_tags(best)}")
     lines += _candidate_details(best, "     ")
     if result.alternatives:
         lines += ["", "Alternatives:"]
@@ -205,9 +225,12 @@ def render_comparison(result: ComparisonResult, state: GameState, engine: Domini
                          result.information_level, [])
     if not legal:
         lines.append("No legal action to evaluate.")
+    elif result.tie:
+        lines += _tie_lines(result.tied_actions, result.objective, result.value_name, legal[0], result.horizon)
     else:
         lines.append(f">> RECOMMENDED: {legal[0].action['label']}    {result.value_name} {plan_value(legal[0])} "
                      f"{_tags(legal[0])}")
+    if legal:
         lines += ["", "Side by side (best first):"]
         for i, c in enumerate(legal, start=1):
             lines.append(_candidate_row(i, c, result.value_name))

@@ -1,0 +1,22 @@
+{
+  "domain": "dominion",
+  "config": {
+    "num_players": 2,
+    "kingdom": null,
+    "player_name": "You",
+    "max_worlds": 5000,
+    "snapshot": null
+  },
+  "events": [
+    {
+      "kind": "observe_hand",
+      "cards": [
+        "Copper",
+        "Copper",
+        "Copper",
+        "Copper",
+        "Estate"
+      ]
+    }
+  ]
+}

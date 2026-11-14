@@ -3,7 +3,9 @@
 Card effects come only from :class:`DominionRuleEngine` (``apply`` / ``resolve_pending``);
 this module adds what the engine deliberately leaves open: which cards are drawn
 (a :class:`DrawOutcome` chosen by a chance node) and where known cards move between
-the draw pile, discard pile and hand. Inputs are never mutated.
+the draw pile, discard pile and hand. Inputs are never mutated. For the ``hands:N``
+horizon, ``simulate_projected_cleanup`` moves a projected future hand (no decisions in
+future turns) to the discard pile so that the following hand can be drawn.
 
 Manual steps left by the engine are handled as follows:
 
@@ -49,7 +51,8 @@ class PlanState:
     draw: DrawPileKnowledge
     discard: DiscardKnowledge
     turn_ended: bool = False
-    next_hand: tuple[str, ...] | None = None  # Stage B: hand drawn after Clean-up
+    next_hand: tuple[str, ...] | None = None  # Stage B: hand drawn after Clean-up (the latest projected hand)
+    projected: tuple[tuple[str, ...], ...] = ()  # earlier projected hands, already cleaned up (horizon hands:N)
     boundary: str | None = None      # why planning cannot continue from here
     unknown_in_hand: int = 0         # drawn "?" cards (the engine only tracks known cards)
 
@@ -63,8 +66,13 @@ class PlanState:
             tuple(sorted(self.game.trash)),
             (self.draw.top, self.draw.rest, self.draw.unknown, self.draw.size_known),
             (self.discard.cards, self.discard.unknown, self.discard.size_known),
-            self.turn_ended, self.next_hand, self.boundary,
+            self.turn_ended, self.next_hand, self.projected, self.boundary,
         )
+
+    @property
+    def projected_hands(self) -> tuple[tuple[str, ...], ...]:
+        """Every projected future hand so far, earliest first (the last one may still be owed cards)."""
+        return self.projected + (() if self.next_hand is None else (self.next_hand,))
 
 
 def _sync(ps: PlanState) -> PlanState:
@@ -171,8 +179,26 @@ def simulate_end_turn(ps: PlanState, engine: DominionRuleEngine) -> PlanState:
     return _sync(replace(ps, game=after, discard=discard, turn_ended=True, unknown_in_hand=0))
 
 
+def simulate_projected_cleanup(ps: PlanState, engine: DominionRuleEngine) -> PlanState:
+    """Clean-up of a projected future turn in which nothing is decided (horizon ``hands:N``).
+
+    The fully drawn projected hand goes to the discard pile ("?" cards as unknown cards) and
+    the following hand becomes pending; drawing it (and reshuffling, if the rules require it)
+    is a separate chance step (``simulate_draw``).
+    """
+    if not ps.turn_ended or ps.next_hand is None or pending_draws(ps):
+        raise ValueError("A projected Clean-up needs a fully drawn projected hand after the turn ended.")
+    known = [c for c in ps.next_hand if c != UNKNOWN_CARD]
+    discard = cleanup_zones(ps.discard, known, (), len(ps.next_hand) - len(known))
+    game = replace(ps.game, turn=replace(ps.game.turn, pending_draws=engine.ruleset.hand_size))
+    return _sync(replace(ps, game=game, discard=discard, projected=ps.projected_hands, next_hand=None))
+
+
 def card_totals(ps: PlanState) -> Counter:
-    """Every card accounted for across hand, play, known zones, next hand and "?" placeholders."""
+    """Every card accounted for across hand, play, known zones, next hand and "?" placeholders.
+
+    Earlier projected hands (``projected``) are only a record: their cards are in the discard pile.
+    """
     t = ps.game.turn
     totals = Counter(t.hand) + Counter(t.in_play) + Counter(ps.next_hand or ())
     totals[UNKNOWN_CARD] += ps.unknown_in_hand

@@ -6,7 +6,7 @@ without touching existing rule logic.
 
 | Game | Ruleset | Status |
 |------|---------|--------|
-| `dominion` | Dominion Second Edition, Base Set, 2–4 players | V1 - rule engine + heuristic policy + CLI; Phase 2 - probabilistic lookahead planner |
+| `dominion` | Dominion Second Edition, Base Set, 2–4 players | V1 - rule engine + heuristic policy + CLI; Phase 2 - probabilistic lookahead planner; Phase 2b - session tracking & belief state |
 
 For Dominion, describe your current turn (or load a JSON snapshot) and it will:
 
@@ -15,7 +15,9 @@ For Dominion, describe your current turn (or load a JSON snapshot) and it will:
 3. rank the legal moves with a heuristic policy you can inspect line by line,
 4. show a plan for the rest of the phase, a confidence level, and what it doesn't know,
 5. or (Phase 2) look ahead through the rest of the turn with exact draw probabilities when you tell it
-   what is in your draw and discard piles (`cardgame dominion plan` / `compare`).
+   what is in your draw and discard piles (`cardgame dominion plan` / `compare`),
+6. or (Phase 2b) track a real game turn by turn from the starting deck: you enter only what it cannot
+   deduce, and it keeps an exact belief about your hidden cards (`cardgame dominion session ...`).
 
 No internet, API, or LLM is used at runtime. All rule and card data is bundled in the package.
 Dominion rule research sources and dates: [`docs/RULES_RESEARCH.md`](docs/RULES_RESEARCH.md).
@@ -66,6 +68,7 @@ cardgame dominion recommend --example village_smithy_action
 cardgame dominion recommend --example endgame_penultimate_province
 cardgame dominion plan --example stranded_draw_vs_money       # lookahead planner (Phase 2)
 cardgame dominion interactive                              # build a snapshot by answering questions
+cardgame dominion session interactive game.json            # track a real game turn by turn (Phase 2b)
 pytest                                                     # run the test suite
 ```
 
@@ -96,6 +99,7 @@ All game commands are `cardgame <game> <command>`; `cardgame games` lists games.
 | `cardgame dominion sources` | Research sources and dates |
 | `cardgame dominion plan STATE.json` | Lookahead planner: next action by expected value with exact draw odds (see [below](#lookahead-planner-phase-2)) |
 | `cardgame dominion compare STATE.json [--actions LABEL ...]` | Every legal first action (or the listed ones) evaluated side by side by the planner |
+| `cardgame dominion session <verb> FILE ...` | Track a real game across turns: record events, deduce hidden cards, predict hands, plan (see [below](#session-tracking--belief-state-phase-2b)) |
 
 Example output:
 
@@ -258,7 +262,7 @@ the draw pile runs out. It falls back to seeded Monte Carlo sampling only when a
                |  {"top": ["Gold"], "composition": {"Copper": 2}, "unknown_count": 2},  // partial
   "discard_pile": {"composition": {"Copper": 2}, "unknown_count": 0}
 },
-"planning": {"horizon": "turn"}          // or "next_hand": default horizon for the planner
+"planning": {"horizon": "turn"}          // or "next_hand" / "hands:N" (1-4): default horizon for the planner
 ```
 
 Without `draw_pile`, the planner derives what it can by exact subtraction (`owned_cards` minus hand,
@@ -278,7 +282,8 @@ reported in the output. The **information level** of the draw pile is one of:
 |---|---|---|
 | `money` (default) | E[coins generated this turn] (coins left + cost of cards bought) | exact; does **not** judge which card you buy |
 | `threshold:N` | P(at least $N this turn) | exact probability |
-| `next_hand_money` | E[coins in the hand drawn after Clean-up] (needs horizon `next_hand`) | exact |
+| `next_hand_money` | E[coins in the hand drawn after Clean-up] (needs horizon `next_hand` or `hands:N`) | exact |
+| `future_money` | E[total Treasure coins over the N projected hands] (horizon `hands:N`) | exact (Monte Carlo over budget; `?` = $0, lower bound) |
 | `purchase` | heuristic value of the cards bought (V1 policy weights) | heuristic score, not coins or a probability |
 
 Every value carries a provenance label: `exact` (no randomness), `expected` (probability-weighted
@@ -288,6 +293,41 @@ over an exact enumeration), `monte_carlo` (sampled estimate, shown `± stderr`),
 nothing). Threshold probabilities are labelled the same way. When the recommended action beats an
 alternative whose value is a lower bound or partial, the output says the comparison is **not
 conclusive**.
+
+**Horizons.** `turn` (default) stops at your Clean-up. `hands:N` (1 <= N <= 4; `next_hand` = `hands:1`)
+also projects your next N start-of-turn hands with **no decisions in future turns**: each projected
+hand goes to the discard pile at its Clean-up and the next one is drawn, reshuffling by the rules.
+Per projected hand the output reports E[$] and P(hand >= $5).
+
+**Ties.** When the best and second-best candidates have equal value under the objective (|delta| <= 1e-9),
+the result says so (`tie: true`, `tied_actions`, `>> TIE ...`) instead of presenting an arbitrary winner:
+the decision is beyond that objective/horizon. Example (real output, trimmed) on this turn-1 snapshot
+`t1.json` (First Game Kingdom listed as 10 names, elided here):
+
+```json
+{"num_players": 2, "turn_number": 1, "kingdom": ["Cellar", "...", "Workshop"],
+ "player": {"phase": "buy", "hand": ["Estate"], "in_play": ["Copper", "Copper", "Copper", "Copper"], "coins": 4,
+            "owned_cards": {"Copper": 7, "Estate": 3},
+            "draw_pile": {"composition": {"Copper": 3, "Estate": 2}}, "discard_pile": {"composition": {}}}}
+```
+
+```text
+$ cardgame dominion compare t1.json --horizon next_hand --objective next_hand_money --actions "Buy Silver" "End turn (Clean-up)"
+>> TIE under objective next_hand_money (horizon next_hand): Buy Silver, End turn (Clean-up)    E[next-hand $] = 3.00
+   No difference under this objective/horizon - the decision is beyond it (try another objective or a longer horizon).
+
+$ cardgame dominion compare t1.json --horizon hands:2 --objective future_money --actions "Buy Silver" "End turn (Clean-up)"
+>> RECOMMENDED: Buy Silver    E[future $] = 7.09 [expected; search exact]
+   1. Buy Silver                                   E[future $] = 7.09            [expected; search exact]
+          hand 1: E[$] = 3.00, P($>=5) = 0.00  (exact)
+          hand 2: E[$] = 4.09, P($>=5) = 0.35  (exact)
+   2. End turn (Clean-up)                          E[future $] = 6.50            [expected; search exact]
+          hand 1: E[$] = 3.00, P($>=5) = 0.00  (exact)
+          hand 2: E[$] = 3.50, P($>=5) = 0.08  (exact)
+```
+
+The next hand is already fixed (the 5 cards left on the draw pile), so the Silver only shows up in
+hand 2, after the reshuffle.
 
 ### Examples (actual output, trimmed)
 
@@ -347,7 +387,7 @@ cardgame dominion plan -e small_deck_village_smithy --objective threshold:6
 ```
 
 Options shared by `plan` and `compare`: `STATE` (or `--state PATH`, or `-e NAME`), `--json`
-(the full `to_dict()` result), `--objective`, `--horizon turn|next_hand`, `--depth` (decision steps,
+(the full `to_dict()` result), `--objective`, `--horizon turn|next_hand|hands:N`, `--depth` (decision steps,
 default 8), `--nodes` (node budget, default 20000), `--samples` (Monte Carlo samples per oversized
 chance node, default 32), `--seed` (default 0; results are deterministic for a seed), `--top`
 (outcomes/alternatives shown). `compare --actions` takes action labels as printed by
@@ -359,13 +399,141 @@ A benchmark against the heuristic is in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.m
 
 ### Planner limitations
 
-- One turn (or up to the next hand) only; no multi-turn planning, opponents' turns are not
-  simulated and attacks only affect opponents (cleared).
+- Decisions are searched for the current turn only; `hands:N` projects later hands without decisions
+  in those turns. Opponents' turns are not simulated and attacks only affect opponents (cleared).
 - Player sub-choices (Chapel, Cellar, Remodel, Mine, Workshop, Artisan, Harbinger, Vassal, Sentry,
   Poacher...) stop the line at a `manual:<card>` boundary (value `partial`). Library keeps every card.
 - The search is depth- and budget-limited: results are best-under-budget, never claimed optimal;
   budget cut-offs and sampling are reported.
 - `money` ignores what you buy; `purchase` uses the V1 heuristic weights.
+
+---
+
+## Session tracking & belief state (Phase 2b)
+
+Instead of describing a snapshot every turn, you can track one real game from the start. The engine
+loads the standard starting deck (7 Copper, 3 Estate, shuffled: composition known, order unknown),
+and you record **only what it cannot deduce**: your hand when it is uncertain, your plays and buys,
+cards gained/trashed/discarded, and Supply counts you want to correct. The session file is just the
+event log (`Session.to_dict()` JSON); every command replays it from the start, so results are
+reproducible, and writes are atomic.
+
+What the engine knows, and how it labels it:
+
+| Label | Meaning |
+|---|---|
+| `observed` | you entered it (hand, plays, buys, gains, trashes, Supply counts) |
+| `deduced` | certain consequence of the rules and the history (e.g. "the draw pile is exactly 3 Copper, 2 Estate", or a start-of-turn hand the draw pile forces) |
+| `probabilistic` | an exact mixture over hidden states (weighted "worlds", exact fractions); draws are without replacement and correlated across turns |
+| `unknown` | identity or size not known (shown as `?`; never guessed) |
+
+A **contradiction** (an observation no hidden state allows, more copies than you own, an unaffordable
+buy) is rejected with exit code 1 and the file is left unchanged. An **incomplete** history (unobserved
+draws, a mid-game start, untracked opponents' gains) is not an error: it is listed under
+"Incomplete history" and probabilities stay honest about it.
+
+Verbs (`cardgame dominion session <verb> FILE ...`; all read verbs and mutating verbs take `--json`):
+
+| Verb | Records / does |
+|---|---|
+| `start [--players N] [--kingdom first\|"A, B, ..."] [--from-snapshot S.json] [--force]` | new session (opening hand pending) |
+| `hand "4 Copper, Estate"` | your hand (resolves the start-of-turn draw; otherwise checks it) |
+| `draw "Silver"` / `draw --count N` | mid-turn draws, seen or unseen |
+| `play CARD [--throne-target X] [--trash-copper]` | a play, through the rule engine |
+| `buy CARD` | a purchase (Treasures in hand are played first if needed) |
+| `gain CARD [--to discard\|hand\|deck]`, `trash CARD [--from hand\|in_play\|discard]`, `discard "cards"` | other card movements (e.g. Workshop, Chapel, an opponent's Militia) |
+| `supply PILE=N` | an observed Supply count |
+| `end-turn` | Clean-up; the next 5 cards become the pending hand |
+| `show`, `predict [--top K]`, `plan [planner flags]`, `history` | belief, next-hand distribution, lookahead planner, event log |
+| `undo`, `correct INDEX <verb> [args]`, `reset` | fix the log (the whole history is replayed and re-validated) |
+| `interactive` | a small REPL with the same verbs without FILE (`hand 4 Copper, Estate`, `buy Silver`, `predict`, `help`, `quit`); saves after each change |
+
+The spec workflow, as actually run (output trimmed):
+
+```text
+$ cardgame dominion session start game.json
+Initial deck loaded: Copper x7, Estate x3 (shuffled: composition known, order unknown)
+Turn 1 | Phase ACTION | Actions 1 | Buys 1 | $0 | pending draws 5
+Hand: 5 card(s) to draw - not determined: 4 possible hands, P(reshuffle) 0 (see 'predict'; enter it with: hand "...")
+$ cardgame dominion session hand game.json "4 Copper, Estate"
+Recorded #0: hand Copper x4, Estate
+Draw pile (deduced, 5 cards, order unknown): Copper x3, Estate x2
+Next hand (turn 2, if nothing else happens this turn): known exactly - Copper x3, Estate x2
+$ cardgame dominion session buy game.json Silver
+Recorded #1: buy Silver
+Discard (deduced, 1 card): Silver
+$ cardgame dominion session end-turn game.json
+Recorded #2: end-turn
+Turn 2 | Phase ACTION | Actions 1 | Buys 1 | $0 | pending draws 5
+Hand (deduced): Copper x3, Estate x2
+  (the 5 pending draw(s) are determined by the draw pile - no need to enter them)
+$ cardgame dominion session buy game.json Silver
+Recorded #3: buy Silver
+Next hand (turn 3, if nothing else happens this turn): 12 possible hands (exact), P(reshuffle) 1, E[$] 55/12 = 4.583 (see 'predict')
+$ cardgame dominion session end-turn game.json
+Hand: 5 card(s) to draw - not determined: 12 possible hands, a reshuffle is certain (see 'predict'; enter it with: hand "...")
+Discard (deduced, 12 cards): Copper x7, Estate x3, Silver x2
+$ cardgame dominion session predict game.json --top 4
+Start-of-turn hand - turn 3, 5 cards, method exact, hidden states 1
+P(reshuffle while drawing): 1
+12 possible hands (most likely first):
+  35/132 = 0.265       Copper x3, Estate, Silver
+  7/44 = 0.159         Copper x2, Estate x2, Silver
+  35/264 = 0.133       Copper x4, Estate
+  35/264 = 0.133       Copper x3, Estate x2
+  41/132 = 0.311       (8 other hands; use --top)
+  Sum over all 12 hands: 1
+E[$ from Treasures]: 55/12 = 4.583
+$ cardgame dominion session hand game.json "3 Copper, Estate, Silver"
+Draw pile (deduced, 7 cards, order unknown): Copper x4, Estate x2, Silver
+$ cardgame dominion session end-turn game.json
+$ cardgame dominion session predict game.json --top 3
+Start-of-turn hand - turn 4, 5 cards, method exact, hidden states 1
+  8/21 = 0.381         Copper x3, Estate, Silver
+  2/7 = 0.286          Copper x2, Estate x2, Silver
+  4/21 = 0.190         Copper x3, Estate x2
+  1/7 = 0.143          (2 other hands; use --top)
+  Sum over all 5 hands: 1
+P(at least one):
+  Copper       1
+  Estate       20/21 = 0.952
+  Silver       5/7 = 0.714
+$ cardgame dominion session hand game.json "3 Copper, Silver x2"
+Rejected (inconsistent): Event #7 (observe_hand): impossible card counts in the observed hand: 2 Silver (at most 1 possible)
+The session file was not changed.                                       # exit code 1
+```
+
+`plan` runs the lookahead planner on the tracked state (with the same flags as `cardgame dominion plan`,
+e.g. `--horizon hands:2 --objective future_money`); a hand that is pending but deduced is used as is.
+`predict --json` returns `HandPrediction.to_dict()` (exact fractions as `"a/b"` strings).
+
+**Starting mid-game.** `session start FILE --from-snapshot S.json` takes a (partial) snapshot in the
+usual format. Only what it states or implies is used; the rest stays unknown:
+
+```text
+$ cardgame dominion session start mid.json --from-snapshot partial_knowledge.json
+Started from snapshot partial_knowledge.json: history before it is unknown (not invented).
+Turn 10 | Phase ACTION | Actions 1 | Buys 1 | $0
+Hand (observed, 5 cards): Copper x2, Militia, Silver, Smithy
+Draw pile (unknown, 6 cards, top first: Gold, rest in unknown order): Copper x2, Estate, Gold + 2 unknown ('?')
+Discard (unknown, 3 cards): Copper x2 + 1 unknown ('?')
+```
+
+### Session limitations
+
+- Single-player tracking: only your own deck is tracked. Opponents' effects on you (Militia, Witch,
+  Bandit...) must be recorded manually with `discard` / `gain` / `trash`.
+- The Supply is never used to infer your own gains; other players' buys are not tracked, so record
+  counts you care about with `supply PILE=N`.
+- If the number of hidden states would exceed `max_worlds` (default 5000), they are collapsed to what
+  is certain and the rest becomes `?` (flagged; predictions become lower bounds).
+- The planner works on one state: with a mixture of hidden states, cards whose location is uncertain
+  are passed as `?` (a conservative approximation, reported in the plan's notes); it refuses to plan
+  while the current hand is undetermined.
+- A purchase recorded while your hand is still unknown is used as evidence about that hand: hands
+  that could not afford it are ruled out, and the remaining hands keep their relative probabilities
+  (this assumes what you chose to buy did not depend on which affordable hand you had). Enter the hand
+  first to avoid this assumption.
 
 ---
 
@@ -375,7 +543,8 @@ A benchmark against the heuristic is in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.m
 pyproject.toml
 src/card_game_engine/
   core/          game-agnostic contracts (RuleEngine, Policy, GameAction, Transition, GameDefinition) + registry;
-                 search.py: generic expectimax + Monte Carlo with budgets (Phase 2)
+                 search.py: generic expectimax + Monte Carlo with budgets (Phase 2);
+                 session.py: initialize_session(domain, config) dispatch (Phase 2b)
   cli.py         `cardgame <game> <command>` entry point
   games/
     dominion/    first game plugin
@@ -383,13 +552,15 @@ src/card_game_engine/
       rules/     DominionRuleEngine: cards, ruleset, state, actions, engine, validation, zones (pile knowledge)
       policy/    HeuristicPolicy: context, weights, scoring
       planning/  lookahead planner: draws, transitions, evaluation (objectives), planner (public API)
-      cli/       commands, interactive assistant, parsing, rendering
+      inference/ session tracking (Phase 2b): events, belief (weighted worlds), session (public API)
+      cli/       commands, interactive assistant, session_cli (`session` verbs), parsing, rendering
       examples/  bundled example snapshots
 benchmarks/      planner_vs_heuristic.py
 tests/
   test_core.py   registry, interface conformance, a game-agnostic agent-style loop
   test_search.py, test_benchmark.py   generic search, benchmark smoke test
-  dominion/      cards/setup, engine, state, zones, draws, transitions, planner, policy, CLI, offline check
+  dominion/      cards/setup, engine, state, zones, draws, transitions, planner, inference, policy, CLI,
+                 session CLI, offline check
 docs/            RULES_RESEARCH.md, ARCHITECTURE.md, BENCHMARKS.md, flowchart.svg
 ```
 
@@ -408,14 +579,23 @@ make a `games/<id>/` package, implement the core contracts, expose `GAME`, and r
 - Objectives with provenance labels (exact / expected / monte_carlo / heuristic / lower_bound / partial),
   `cardgame dominion plan` / `compare`, examples and a benchmark against the heuristic.
 
+**Done in Phase 2b (v1.3.0):**
+
+- Session tracking from the standard starting deck (or a partial mid-game snapshot): typed events,
+  exact Bayesian belief over hidden zones (weighted worlds), contradiction vs incomplete-history
+  detection, correct/undo/reset with full replay (`inference/`, `core/session.py`).
+- Exact cross-turn next-hand predictions (reshuffles, purchases, correlations between turns).
+- Planner: multi-hand horizon `hands:N` + `future_money` objective, explicit tie reporting.
+- `cardgame dominion session ...` verbs and an interactive session REPL.
+
 **Next (not implemented yet):**
 
-1. **LLM agent orchestration**: expose `legal_actions` / `check` / `apply` / `recommend` /
-   `plan_next_action` / `compare_actions` as tools (actions and results serialise to JSON).
+1. **Exact belief-aware planning over mixtures**: search over the weighted worlds directly instead of
+   the conservative `?` approximation, with decisions that depend on newly observed cards.
+2. **Opponent modelling**: opponents' turns, attacks on you, Moat reactions, Supply depletion.
+3. **LLM agent orchestration**: expose `initialize_session` / `record_event` / `predict_next_hand` /
+   `plan_next_action` plus `legal_actions` / `check` / `apply` as tools (all JSON-serialisable).
    The agent proposes, the rule engine checks.
-2. **Deeper multi-turn planning**: carry zone knowledge across turns and plan purchases by their
-   effect on future hands (beyond `next_hand`).
-3. **Opponent modelling**: opponents' turns, attacks on you, Moat reactions.
 4. **More card games**: new plugins under `games/` (see the guide in ARCHITECTURE.md).
 5. **Screenshot-based state recognition**: produce snapshots from images via `parse_state`.
 6. **External game adapters**: e.g. read state from online play logs.

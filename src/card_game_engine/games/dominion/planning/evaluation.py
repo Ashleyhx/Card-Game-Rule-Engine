@@ -3,7 +3,8 @@
 A leaf is described by two planning states: ``turn`` - the state at the end of (or,
 for a cut-off leaf, during) the current turn, before Clean-up - and ``final`` - the
 last state reached (after Clean-up and the next-hand draw for the ``next_hand``
-horizon; the same object as ``turn`` otherwise). :func:`leaf_metrics` turns them into
+horizon, or after the last projected hand for ``hands:N``; the same object as ``turn``
+otherwise). :func:`leaf_metrics` turns them into
 plain numbers; an :class:`Objective` turns the metrics into one utility.
 
 Provenance of every number is explicit (``METRIC_PROVENANCE``):
@@ -32,7 +33,7 @@ from ..rules.zones import UNKNOWN_CARD
 from .draws import BOUNDARY_UNKNOWN_DRAW_PILE
 from .transitions import PlanState
 
-OBJECTIVE_NAMES = ("money", "threshold:<T>", "purchase", "next_hand_money")
+OBJECTIVE_NAMES = ("money", "threshold:<T>", "purchase", "next_hand_money", "future_money")
 
 #: Weight of the secondary tie-break added to the utility during search. The tie-break
 #: is in [0, 1), so it moves a value by less than 1e-6 and never outweighs a real
@@ -57,6 +58,11 @@ METRIC_PROVENANCE: dict[str, str] = {
     "next_hand_coins": "exact",
     "next_hand_unknown": "exact",
     "next_hand_coins_is_lower_bound": "exact",
+    "hand_coins": "exact",
+    "hand_unknown": "exact",
+    "hand_coins_is_lower_bound": "exact",
+    "future_coins": "exact",
+    "future_coins_is_lower_bound": "exact",
 }
 
 
@@ -114,12 +120,22 @@ def leaf_metrics(turn: PlanState, final: PlanState, engine: DominionRuleEngine, 
         "boundary": final.boundary,
         "stopped": stopped,
     }
-    if final.next_hand is not None:
-        unknown = sum(1 for c in final.next_hand if c == UNKNOWN_CARD)
-        m["next_hand"] = list(final.next_hand)
-        m["next_hand_coins"] = sum(engine.card(c).treasure_value for c in final.next_hand if c != UNKNOWN_CARD)
-        m["next_hand_unknown"] = unknown
-        m["next_hand_coins_is_lower_bound"] = unknown > 0 or final.game.turn.pending_draws > 0
+    hands = final.projected_hands
+    if hands:
+        # Per projected hand; only the last one can still be owed cards (unknown draw pile).
+        coins = [sum(engine.card(c).treasure_value for c in h if c != UNKNOWN_CARD) for h in hands]
+        unknown = [sum(1 for c in h if c == UNKNOWN_CARD) for h in hands]
+        owed = [0] * (len(hands) - 1) + [final.game.turn.pending_draws]
+        lower = [u > 0 or o > 0 for u, o in zip(unknown, owed)]
+        m["next_hand"] = list(hands[0])
+        m["next_hand_coins"] = coins[0]
+        m["next_hand_unknown"] = unknown[0]
+        m["next_hand_coins_is_lower_bound"] = lower[0]
+        m["hand_coins"] = coins
+        m["hand_unknown"] = unknown
+        m["hand_coins_is_lower_bound"] = lower
+        m["future_coins"] = sum(coins)
+        m["future_coins_is_lower_bound"] = any(lower)
     return m
 
 
@@ -129,9 +145,9 @@ def leaf_label(m: dict[str, Any]) -> str:
     parts.append("bought " + ", ".join(m["bought"]) if m["bought"] else "bought nothing")
     if m["unknown_cards_in_hand"]:
         parts.append(f"{m['unknown_cards_in_hand']} unknown card(s) in hand")
-    if "next_hand_coins" in m:
-        lb = "+" if m["next_hand_coins_is_lower_bound"] else ""
-        parts.append(f"next hand ${m['next_hand_coins']}{lb}")
+    if "hand_coins" in m:
+        hands = [f"${c}{'+' if lb else ''}" for c, lb in zip(m["hand_coins"], m["hand_coins_is_lower_bound"])]
+        parts.append(("next hand " if len(hands) == 1 else "next hands ") + ", ".join(hands))
     if m["boundary"]:
         parts.append(f"boundary {m['boundary']}")
     elif m["stopped"] == "mid_turn":
@@ -228,10 +244,24 @@ class NextHandMoneyObjective:
         return metrics.get("next_hand_coins", 0)
 
 
+@dataclass(frozen=True)
+class FutureMoneyObjective:
+    name: str = "future_money"
+    provenance: str = "exact"
+    value_name: str = "E[future $]"
+
+    def describe(self) -> str:
+        return ("Total coins from Treasures over the projected future hands (horizon hands:N; no decisions in "
+                "future turns); unknown cards ('?') count $0, so the value is a lower bound when they can be drawn.")
+
+    def utility(self, metrics: dict[str, Any]) -> float:
+        return metrics.get("future_coins", 0)
+
+
 def value_is_lower_bound(objective: Objective, metrics: dict[str, Any]) -> bool:
     """True when a leaf's objective value only bounds the true value from below.
 
-    Coins, ``threshold:<T>`` and next-hand coins never decrease when an unknown card turns
+    Coins, ``threshold:<T>``, next-hand and future coins never decrease when an unknown card turns
     out to be known (Treasures add coins, Actions may be left unplayed), so counting unknown
     cards as $0 gives a lower bound. Heuristic objectives are never labelled bounds.
     """
@@ -239,6 +269,8 @@ def value_is_lower_bound(objective: Objective, metrics: dict[str, Any]) -> bool:
         return False
     if isinstance(objective, NextHandMoneyObjective):
         return metrics["coins_is_lower_bound"] or metrics.get("next_hand_coins_is_lower_bound", False)
+    if isinstance(objective, FutureMoneyObjective):
+        return metrics["coins_is_lower_bound"] or metrics.get("future_coins_is_lower_bound", False)
     return metrics["coins_is_lower_bound"]
 
 
@@ -249,6 +281,8 @@ def get_objective(name: str, state: GameState | None = None, engine: DominionRul
         return MoneyObjective()
     if key == "next_hand_money":
         return NextHandMoneyObjective()
+    if key == "future_money":
+        return FutureMoneyObjective()
     if key == "purchase":
         if state is None:
             return PurchaseObjective("mid", "no state given; mid stage assumed")

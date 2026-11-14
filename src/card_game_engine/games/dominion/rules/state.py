@@ -19,7 +19,24 @@ from .ruleset import Ruleset, load_ruleset
 from .zones import DiscardKnowledge, DrawPileKnowledge
 
 SCHEMA_VERSION = 1
-PLANNING_HORIZONS = ("turn", "next_hand")
+MAX_PROJECTED_HANDS = 4
+PLANNING_HORIZONS = ("turn", "next_hand", f"hands:<N> (1-{MAX_PROJECTED_HANDS})")
+
+
+def projected_hand_count(horizon: str) -> int:
+    """Number of future hands a horizon projects: ``turn`` -> 0, ``next_hand`` -> 1, ``hands:N`` -> N.
+
+    Single source of truth for planning horizons (snapshot ``planning.horizon`` and the planner's ``PlanConfig``).
+    Raises ``ValueError`` for anything else.
+    """
+    if horizon == "turn":
+        return 0
+    if horizon == "next_hand":
+        return 1
+    raw = horizon.split(":", 1)[1] if isinstance(horizon, str) and horizon.startswith("hands:") else ""
+    if raw.isdigit() and 1 <= int(raw) <= MAX_PROJECTED_HANDS:
+        return int(raw)
+    raise ValueError(f"horizon must be one of {', '.join(PLANNING_HORIZONS)} (got {horizon!r})")
 
 
 class Phase(str, Enum):
@@ -75,7 +92,7 @@ class GameState:
     assumptions: list[str] = field(default_factory=list)
     draw_pile: DrawPileKnowledge | None = None
     discard_pile: DiscardKnowledge | None = None
-    planning_horizon: str | None = None  # "turn" | "next_hand"
+    planning_horizon: str | None = None  # "turn" | "next_hand" | "hands:N"
 
     def copy(self) -> "GameState":
         return copy.deepcopy(self)
@@ -242,9 +259,12 @@ def _parse_planning(raw: Any, errors: list[str]) -> str | None:
     if not _check_keys(raw, ("horizon",), "planning", errors):
         return None
     horizon = raw.get("horizon")
-    if horizon is not None and horizon not in PLANNING_HORIZONS:
-        errors.append(f"planning.horizon: must be one of {', '.join(PLANNING_HORIZONS)} (got {horizon!r}).")
-        return None
+    if horizon is not None:
+        try:
+            projected_hand_count(horizon)
+        except ValueError:
+            errors.append(f"planning.horizon: must be one of {', '.join(PLANNING_HORIZONS)} (got {horizon!r}).")
+            return None
     return horizon
 
 
