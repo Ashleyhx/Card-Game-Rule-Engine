@@ -29,5 +29,6 @@ htmlcov/
 # Secrets
 .env
 
-# Local runtime output
+# Local runtime output (interactive snapshots, session files)
 game.json
+*.session.json

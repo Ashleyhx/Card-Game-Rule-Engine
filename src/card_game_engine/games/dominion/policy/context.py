@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 
 from ..rules import GameState, DominionRuleEngine
 
-STAGES = ("early", "mid", "dance", "late", "endgame")
-
 
 @dataclass
 class DeckStats:

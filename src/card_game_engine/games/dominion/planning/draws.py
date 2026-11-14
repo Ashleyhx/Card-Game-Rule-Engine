@@ -15,7 +15,7 @@ from fractions import Fraction
 from math import comb
 from typing import Any, Iterator
 
-from ..rules.zones import UNKNOWN_CARD, DiscardKnowledge, DrawPileKnowledge, reshuffle
+from ..rules.zones import UNKNOWN_CARD, DiscardKnowledge, DrawPileKnowledge, expand_counts, reshuffle
 
 BOUNDARY_UNKNOWN_DRAW_PILE = "unknown_draw_pile"
 
@@ -62,10 +62,6 @@ def _pool(pile: DrawPileKnowledge) -> list[tuple[str, int]]:
     return list(pile.rest) + ([(UNKNOWN_CARD, pile.unknown)] if pile.unknown else [])
 
 
-def _expand(items: list[tuple[str, int]]) -> list[str]:
-    return [c for c, n in items for _ in range(n)]
-
-
 def _plan(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int) -> _Plan:
     if not draw.size_known:
         return _Plan((), draw, discard, 0, boundary=BOUNDARY_UNKNOWN_DRAW_PILE if n else None, owed=n)
@@ -75,7 +71,7 @@ def _plan(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int) -> _Plan:
     if n <= pool_size:
         pile = DrawPileKnowledge(draw.top[k:], draw.rest, draw.unknown, True, draw.source)
         return _Plan(fixed, pile, discard, n)
-    fixed += tuple(_expand(_pool(draw)))
+    fixed += tuple(expand_counts(_pool(draw)))
     n -= pool_size
     reshuffled = not discard.size_known or discard.size > 0
     pile, discard = reshuffle(discard)
@@ -141,5 +137,5 @@ def count_draw_outcomes(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: i
 def sample_draw(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int, rng: random.Random) -> DrawOutcome:
     """One outcome sampled with ``rng`` (reproducible for a given seed); ``probability`` is None."""
     plan = _plan(draw, discard, n)
-    drawn = Counter(rng.sample(_expand(_pool(plan.pile)), plan.m))
+    drawn = Counter(rng.sample(expand_counts(_pool(plan.pile)), plan.m))
     return _outcome(plan, drawn, None)

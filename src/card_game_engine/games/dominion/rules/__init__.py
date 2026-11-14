@@ -17,7 +17,7 @@ from .actions import (
 from .cards import CardDef, CardRegistry, UnknownCardError, load_registry
 from .engine import GameEndStatus, IllegalActionError, DominionRuleEngine, Transition
 from .ruleset import Ruleset, load_ruleset
-from .state import GameState, OpponentInfo, Phase, SnapshotError, TurnState, new_game_turn_state, state_from_dict
+from .state import GameState, OpponentInfo, Phase, SnapshotError, TurnState, state_from_dict
 from .validation import Issue, has_errors, validate_state
 from .zones import (
     UNKNOWN_CARD,
@@ -37,7 +37,7 @@ __all__ = [
     "CardDef", "CardRegistry", "UnknownCardError", "load_registry",
     "GameEndStatus", "IllegalActionError", "DominionRuleEngine", "Transition",
     "Ruleset", "load_ruleset",
-    "GameState", "OpponentInfo", "Phase", "SnapshotError", "TurnState", "new_game_turn_state", "state_from_dict",
+    "GameState", "OpponentInfo", "Phase", "SnapshotError", "TurnState", "state_from_dict",
     "Issue", "has_errors", "validate_state",
     "UNKNOWN_CARD", "DiscardKnowledge", "DrawPileKnowledge", "InformationLevel", "add_to_discard",
     "cleanup_zones", "derive_zone_knowledge", "put_on_top", "reshuffle",

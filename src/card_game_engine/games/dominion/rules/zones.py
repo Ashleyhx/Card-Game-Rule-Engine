@@ -30,6 +30,15 @@ class InformationLevel(str, Enum):
     INSUFFICIENT = "insufficient"            # draw pile size unknown
 
 
+def expand_counts(counts: Mapping[str, int] | Iterable[tuple[str, int]]) -> list[str]:
+    """``{"Estate": 1, "Copper": 2}`` or ``[("Copper", 2), ...]`` -> one name per card.
+
+    A mapping is expanded in name order; pairs keep their order.
+    """
+    items = sorted(counts.items()) if isinstance(counts, Mapping) else counts
+    return [card for card, n in items for _ in range(n)]
+
+
 def _normalise_counts(counts: Mapping[str, int] | Iterable[tuple[str, int]]) -> CardCounts:
     items = dict(counts.items() if isinstance(counts, Mapping) else counts)
     if any(n < 0 for n in items.values()):

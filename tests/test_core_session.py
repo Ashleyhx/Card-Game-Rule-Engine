@@ -1,7 +1,5 @@
 """Game-agnostic session entry point (core.initialize_session)."""
 
-import dataclasses
-
 import pytest
 
 from card_game_engine.core import GameDefinition, get_game, initialize_session
@@ -24,17 +22,13 @@ def test_unknown_domain():
         initialize_session("poker")
 
 
-def test_game_without_session_support(monkeypatch):
-    plain = dataclasses.replace(get_game("dominion"), initialize_session=None)
-    monkeypatch.setattr(core_session, "get_game", lambda domain: plain)
-    with pytest.raises(NotImplementedError, match="does not support"):
-        initialize_session("dominion")
-
-
-def test_game_definition_field_is_optional():
+def test_session_support_is_optional_per_game(monkeypatch):
     g = get_game("dominion")
     legacy = GameDefinition(g.id, g.name, g.ruleset, g.create_engine, g.create_policy, g.parse_state, g.register_cli)
-    assert legacy.initialize_session is None and g.initialize_session is not None
+    assert legacy.initialize_session is None and g.initialize_session is not None  # the field has a default
+    monkeypatch.setattr(core_session, "get_game", lambda domain: legacy)
+    with pytest.raises(NotImplementedError, match="does not support"):
+        initialize_session("dominion")
 
 
 def test_bad_config_rejected():

@@ -38,6 +38,7 @@ card_game_engine/
         │   ├── events.py        typed JSON events (ObserveHand, RecordDraw/Play/Purchase/Gain/Trash/Discard/Supply,
         │   │                    EndTurnObservation); InconsistentObservation vs IllegalEvent
         │   ├── belief.py        World (weighted hypothesis), BeliefState, exact conditioning, predictive draws
+        │   ├── replay.py        apply_event: applies one event to a BeliefState (the reducer replayed by session)
         │   └── session.py       Session (config + event log, replayed); record/correct/remove/reset,
         │                        infer_belief_state, predict_next_hand, to_game_state, plan_next_action
         ├── cli/               `cardgame dominion ...` commands, interactive assistant, `session` verbs, rendering

@@ -67,7 +67,11 @@ def load_session(path: str | Path) -> Session:
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"No session file '{p}'. Start one with: cardgame dominion session start {p}")
-    return Session.from_dict(json.loads(p.read_text(encoding="utf-8")))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "events" not in data and "player" in data:
+        raise ValueError(f"'{p}' is a game snapshot, not a session file. Start a session from it with: "
+                         f"cardgame dominion session start NEW.session.json --from-snapshot {p}")
+    return Session.from_dict(data)
 
 
 def save_session(path: str | Path, session: Session) -> None:
@@ -182,14 +186,25 @@ def _hand_lines(session: Session, pred: HandPrediction) -> list[str]:
     return [line]
 
 
+def _unknown_only(pred: HandPrediction) -> bool:
+    """Every possible hand consists only of unknown cards: nothing can be predicted."""
+    return bool(pred.distribution) and all(set(cards) <= {UNKNOWN_CARD} for cards, *_ in pred.distribution)
+
+
+def _bound(pred: HandPrediction) -> str:
+    return ">= " if pred.lower_bound else ""
+
+
 def _next_hand_line(pred: HandPrediction) -> list[str]:
     if pred.which == "start_of_turn":
         return []
     head = f"Next hand (turn {pred.turn if pred.turn is not None else '?'}, if nothing else happens this turn): "
     if pred.deterministic:
         return [head + f"known exactly - {fmt_cards(list(pred.hand or ()))}"]
+    if _unknown_only(pred):
+        return [head + "unknown - the draw pile's contents are not known (enter the hand when you draw it)"]
     return [head + f"{len(pred.distribution)} possible hands ({pred.method}), P(reshuffle) {fmt_p(pred.p_reshuffle)}, "
-                   f"E[$] {fmt_p(pred.expected_coins)} (see 'predict')"]
+                   f"E[$] {_bound(pred)}{fmt_p(pred.expected_coins)} (see 'predict')"]
 
 
 def render_belief(session: Session, full: bool = False) -> list[str]:
@@ -239,6 +254,11 @@ def render_prediction(pred: HandPrediction) -> list[str]:
              f"method {pred.method}, hidden states {pred.worlds}"]
     if pred.deterministic:
         lines.append(f"Known exactly: {fmt_cards(list(pred.hand or ()))}")
+    elif _unknown_only(pred):
+        lines.append(f"Not predictable: the draw pile's contents are unknown, so all {pred.size} cards are '?'.")
+        lines.append("Enter the hand with `hand \"...\"` when you draw it; tracking from there is exact.")
+        lines += [f"Note: {n}" for n in pred.notes]
+        return lines
     lines.append(f"P(reshuffle while drawing): {fmt_p(pred.p_reshuffle)}")
     if not pred.deterministic:
         lines.append(f"{len(pred.distribution)} possible hands (most likely first):")
@@ -251,8 +271,9 @@ def render_prediction(pred: HandPrediction) -> list[str]:
         total = (sum((pe for _, pe, _ in pred.distribution), Fraction(0)) if pred.method == "exact"
                  else sum(p for *_, p in pred.distribution))
         lines.append(f"  Sum over all {len(pred.distribution)} hands: {fmt_p(total)}")
-    lines.append(f"E[$ from Treasures]: {fmt_p(pred.expected_coins)}")
-    lines.append("P($ >= k): " + "   ".join(f"{k}: {fmt_p(v)}" for k, v in pred.p_coins_at_least.items()))
+    bound = " (lower bound: '?' cards counted as $0)" if pred.lower_bound else ""
+    lines.append(f"E[$ from Treasures]: {_bound(pred)}{fmt_p(pred.expected_coins)}{bound}")
+    lines.append("P($ >= k): " + "   ".join(f"{k}: {_bound(pred)}{fmt_p(v)}" for k, v in pred.p_coins_at_least.items()))
     if pred.p_at_least_one:
         lines.append("P(at least one):")
         lines += [f"  {name:<12} {fmt_p(v)}" for name, v in pred.p_at_least_one.items()]

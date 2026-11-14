@@ -16,7 +16,7 @@ from typing import Any
 
 from .cards import CardRegistry, UnknownCardError, load_registry
 from .ruleset import Ruleset, load_ruleset
-from .zones import DiscardKnowledge, DrawPileKnowledge
+from .zones import DiscardKnowledge, DrawPileKnowledge, expand_counts
 
 SCHEMA_VERSION = 1
 MAX_PROJECTED_HANDS = 4
@@ -173,13 +173,6 @@ def parse_card_counts(value: Any, registry: CardRegistry, field_name: str, error
     return counts
 
 
-def _expand(counts: Counter) -> list[str]:
-    out: list[str] = []
-    for name in sorted(counts):
-        out.extend([name] * counts[name])
-    return out
-
-
 def _int_field(data: dict, key: str, default: int | None, errors: list[str], where: str, minimum: int = 0):
     if key not in data or data[key] is None:
         return default
@@ -268,6 +261,138 @@ def _parse_planning(raw: Any, errors: list[str]) -> str | None:
     return horizon
 
 
+def _parse_kingdom(raw: Any, registry: CardRegistry, ruleset: Ruleset, errors: list[str]) -> list[str]:
+    if not isinstance(raw, list):
+        errors.append("kingdom: expected a list of 10 Kingdom card names.")
+        return []
+    kingdom: list[str] = []
+    for name in raw:
+        try:
+            cdef = registry.get(str(name))
+        except UnknownCardError as e:
+            errors.append(f"kingdom: {e}")
+            continue
+        if not cdef.kingdom:
+            errors.append(f"kingdom: {cdef.name} is a basic card, not a Kingdom card.")
+            continue
+        if cdef.name in kingdom:
+            errors.append(f"kingdom: {cdef.name} listed twice.")
+            continue
+        kingdom.append(cdef.name)
+    if len(raw) != ruleset.kingdom_pile_count:
+        errors.append(f"kingdom: expected exactly {ruleset.kingdom_pile_count} Kingdom cards (got {len(raw)}).")
+    return kingdom
+
+
+def _parse_supply(raw: Any, kingdom: list[str], num_players: int, registry: CardRegistry, ruleset: Ruleset,
+                  errors: list[str], assumptions: list[str]) -> dict[str, int]:
+    """Starting pile sizes, overridden by the counts the snapshot gives (piles left out are assumed full)."""
+    supply: dict[str, int] = {}
+    try:
+        supply = ruleset.starting_supply(kingdom, num_players, registry)
+    except ValueError as e:
+        errors.append(str(e))
+    if raw is None:
+        assumptions.append("Supply counts were not provided; every pile is assumed to be at its starting size.")
+        return supply
+    if not isinstance(raw, dict):
+        errors.append("supply: expected an object mapping pile name -> cards remaining.")
+        return supply
+    given: set[str] = set()
+    for name, n in raw.items():
+        try:
+            canonical = registry.resolve(name)
+        except UnknownCardError as e:
+            errors.append(f"supply: {e}")
+            continue
+        if canonical not in supply:
+            errors.append(f"supply: {canonical} is not a Supply pile in this game (not in the kingdom).")
+            continue
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            errors.append(f"supply: count for {canonical} must be a non-negative integer.")
+            continue
+        supply[canonical] = n
+        given.add(canonical)
+    missing = [pile for pile in supply if pile not in given]
+    if missing:
+        assumptions.append("Supply counts not given for: " + ", ".join(missing) + " - assumed full.")
+    return supply
+
+
+_PHASE_ALIASES = {"action": Phase.ACTION, "actions": Phase.ACTION, "a": Phase.ACTION,
+                  "buy": Phase.BUY, "b": Phase.BUY, "turn_over": Phase.TURN_OVER}
+
+
+def _parse_turn(p: dict[str, Any], registry: CardRegistry, ruleset: Ruleset, errors: list[str]) -> TurnState:
+    """The current turn from the ``player`` object (only used if ``errors`` stays empty)."""
+    phase = _PHASE_ALIASES.get(str(p.get("phase", "action")).lower().strip())
+    if phase is None:
+        errors.append(f"player.phase: must be 'action', 'buy' or 'turn_over' (got {p.get('phase')!r}).")
+        phase = Phase.ACTION
+
+    def cards(key: str) -> list[str]:
+        return expand_counts(parse_card_counts(p.get(key, []), registry, f"player.{key}", errors))
+
+    hand, in_play, bought = cards("hand"), cards("in_play"), cards("bought_this_turn")
+    actions = _int_field(p, "actions", ruleset.start_actions, errors, "player")
+    buys = _int_field(p, "buys", ruleset.start_buys, errors, "player")
+    coins = _int_field(p, "coins", ruleset.start_coins, errors, "player")
+    pending_draws = _int_field(p, "pending_draws", 0, errors, "player")
+    merchants_played = _int_field(p, "merchants_played", in_play.count("Merchant"), errors, "player")
+    silver_played = p.get("silver_played")
+    if silver_played is None:
+        silver_played = "Silver" in in_play
+    elif not isinstance(silver_played, bool):
+        errors.append("player.silver_played: must be true/false.")
+        silver_played = "Silver" in in_play
+    unresolved = p.get("unresolved") or []
+    if not isinstance(unresolved, list) or not all(isinstance(u, str) for u in unresolved):
+        errors.append("player.unresolved: must be a list of strings.")
+        unresolved = []
+    return TurnState(phase=phase, hand=hand, in_play=in_play, actions=actions, buys=buys, coins=coins, bought=bought,
+                     merchants_played=merchants_played, silver_played=bool(silver_played),
+                     pending_draws=pending_draws, unresolved=list(unresolved))
+
+
+def _parse_opponents(raw: Any, registry: CardRegistry, errors: list[str]) -> list[OpponentInfo]:
+    if not isinstance(raw, list):
+        errors.append("opponents: expected a list.")
+        return []
+    opponents: list[OpponentInfo] = []
+    for i, o in enumerate(raw):
+        if not isinstance(o, dict):
+            errors.append(f"opponents[{i}]: expected an object.")
+            continue
+        owned = None
+        if o.get("owned_cards") is not None:
+            counts = parse_card_counts(o["owned_cards"], registry, f"opponents[{i}].owned_cards", errors)
+            owned = {k: v for k, v in counts.items() if v > 0}
+        vp = o.get("vp")
+        if vp is not None and (not isinstance(vp, int) or isinstance(vp, bool)):
+            errors.append(f"opponents[{i}].vp: must be an integer.")
+            vp = None
+        opponents.append(OpponentInfo(name=str(o.get("name", f"Opponent {i + 1}")), vp=vp, owned_cards=owned))
+    return opponents
+
+
+def _parse_history(raw: Any, registry: CardRegistry, errors: list[str]) -> list[dict[str, Any]]:
+    """Per-turn record written by `interactive --save`: ``[{"turn", "hand", "bought"}, ...]``."""
+    if not isinstance(raw, list):
+        errors.append("history: expected a list.")
+        return []
+    history: list[dict[str, Any]] = []
+    for i, h in enumerate(raw):
+        if not isinstance(h, dict):
+            errors.append(f"history[{i}]: expected an object.")
+            continue
+        history.append({
+            "turn": _int_field(h, "turn", None, errors, f"history[{i}]", minimum=1),
+            "hand": expand_counts(parse_card_counts(h.get("hand", []), registry, f"history[{i}].hand", errors)),
+            "bought": expand_counts(parse_card_counts(h.get("bought", []), registry, f"history[{i}].bought", errors)),
+        })
+    return history
+
+
 def state_from_dict(
     data: dict[str, Any],
     registry: CardRegistry | None = None,
@@ -297,98 +422,16 @@ def state_from_dict(
         )
         num_players = 2  # keep parsing to collect more errors
 
-    # Kingdom ---------------------------------------------------------------
-    kingdom_raw = data.get("kingdom")
-    kingdom: list[str] = []
-    if not isinstance(kingdom_raw, list):
-        errors.append("kingdom: expected a list of 10 Kingdom card names.")
-    else:
-        for name in kingdom_raw:
-            try:
-                cdef = registry.get(str(name))
-            except UnknownCardError as e:
-                errors.append(f"kingdom: {e}")
-                continue
-            if not cdef.kingdom:
-                errors.append(f"kingdom: {cdef.name} is a basic card, not a Kingdom card.")
-                continue
-            if cdef.name in kingdom:
-                errors.append(f"kingdom: {cdef.name} listed twice.")
-                continue
-            kingdom.append(cdef.name)
-        if len(kingdom_raw) != ruleset.kingdom_pile_count:
-            errors.append(
-                f"kingdom: expected exactly {ruleset.kingdom_pile_count} Kingdom cards (got {len(kingdom_raw)})."
-            )
-
-    # Supply ----------------------------------------------------------------
-    supply: dict[str, int] = {}
-    try:
-        supply = ruleset.starting_supply(kingdom, num_players, registry)
-    except ValueError as e:
-        errors.append(str(e))
-    supply_raw = data.get("supply")
-    if supply_raw is None:
-        assumptions.append("Supply counts were not provided; every pile is assumed to be at its starting size.")
-    elif not isinstance(supply_raw, dict):
-        errors.append("supply: expected an object mapping pile name -> cards remaining.")
-    else:
-        given: set[str] = set()
-        for name, n in supply_raw.items():
-            try:
-                canonical = registry.resolve(name)
-            except UnknownCardError as e:
-                errors.append(f"supply: {e}")
-                continue
-            if canonical not in supply:
-                errors.append(f"supply: {canonical} is not a Supply pile in this game (not in the kingdom).")
-                continue
-            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
-                errors.append(f"supply: count for {canonical} must be a non-negative integer.")
-                continue
-            supply[canonical] = n
-            given.add(canonical)
-        missing = [p for p in supply if p not in given]
-        if missing:
-            assumptions.append(
-                "Supply counts not given for: " + ", ".join(missing) + " - assumed full."
-            )
-
-    trash = _expand(parse_card_counts(data.get("trash"), registry, "trash", errors))
+    kingdom = _parse_kingdom(data.get("kingdom"), registry, ruleset, errors)
+    supply = _parse_supply(data.get("supply"), kingdom, num_players, registry, ruleset, errors, assumptions)
+    trash = expand_counts(parse_card_counts(data.get("trash"), registry, "trash", errors))
     turn_number = _int_field(data, "turn_number", None, errors, "snapshot", minimum=1)
 
-    # Player ------------------------------------------------------------------
     p = data.get("player")
     if not isinstance(p, dict):
         errors.append("player: missing or not an object.")
         p = {}
-    phase_raw = str(p.get("phase", "action")).lower().strip()
-    phase_aliases = {"action": Phase.ACTION, "actions": Phase.ACTION, "a": Phase.ACTION,
-                     "buy": Phase.BUY, "b": Phase.BUY, "turn_over": Phase.TURN_OVER}
-    phase = phase_aliases.get(phase_raw)
-    if phase is None:
-        errors.append(f"player.phase: must be 'action', 'buy' or 'turn_over' (got {p.get('phase')!r}).")
-        phase = Phase.ACTION
-
-    hand = _expand(parse_card_counts(p.get("hand", []), registry, "player.hand", errors))
-    in_play = _expand(parse_card_counts(p.get("in_play", []), registry, "player.in_play", errors))
-    bought = _expand(parse_card_counts(p.get("bought_this_turn", []), registry, "player.bought_this_turn", errors))
-
-    actions = _int_field(p, "actions", ruleset.start_actions, errors, "player")
-    buys = _int_field(p, "buys", ruleset.start_buys, errors, "player")
-    coins = _int_field(p, "coins", ruleset.start_coins, errors, "player")
-    pending_draws = _int_field(p, "pending_draws", 0, errors, "player")
-    merchants_played = _int_field(p, "merchants_played", in_play.count("Merchant"), errors, "player")
-    silver_played = p.get("silver_played")
-    if silver_played is None:
-        silver_played = "Silver" in in_play
-    elif not isinstance(silver_played, bool):
-        errors.append("player.silver_played: must be true/false.")
-        silver_played = "Silver" in in_play
-    unresolved = p.get("unresolved") or []
-    if not isinstance(unresolved, list) or not all(isinstance(u, str) for u in unresolved):
-        errors.append("player.unresolved: must be a list of strings.")
-        unresolved = []
+    turn = _parse_turn(p, registry, ruleset, errors)
 
     owned: dict[str, int] | None = None
     if p.get("owned_cards") is not None:
@@ -405,58 +448,14 @@ def state_from_dict(
     discard_pile = _parse_discard_pile(p.get("discard_pile"), registry, errors)
     planning_horizon = _parse_planning(data.get("planning"), errors)
 
-    opponents: list[OpponentInfo] = []
-    opp_raw = data.get("opponents", [])
-    if not isinstance(opp_raw, list):
-        errors.append("opponents: expected a list.")
-        opp_raw = []
-    for i, o in enumerate(opp_raw):
-        if not isinstance(o, dict):
-            errors.append(f"opponents[{i}]: expected an object.")
-            continue
-        o_owned = None
-        if o.get("owned_cards") is not None:
-            oc = parse_card_counts(o["owned_cards"], registry, f"opponents[{i}].owned_cards", errors)
-            o_owned = {k: v for k, v in oc.items() if v > 0}
-        vp = o.get("vp")
-        if vp is not None and (not isinstance(vp, int) or isinstance(vp, bool)):
-            errors.append(f"opponents[{i}].vp: must be an integer.")
-            vp = None
-        opponents.append(OpponentInfo(name=str(o.get("name", f"Opponent {i + 1}")), vp=vp, owned_cards=o_owned))
-    history: list[dict[str, Any]] = []
-    hist_raw = data.get("history", [])
-    if not isinstance(hist_raw, list):
-        errors.append("history: expected a list.")
-        hist_raw = []
-    for i, h in enumerate(hist_raw):
-        if not isinstance(h, dict):
-            errors.append(f"history[{i}]: expected an object.")
-            continue
-        history.append({
-            "turn": _int_field(h, "turn", None, errors, f"history[{i}]", minimum=1),
-            "hand": _expand(parse_card_counts(h.get("hand", []), registry, f"history[{i}].hand", errors)),
-            "bought": _expand(parse_card_counts(h.get("bought", []), registry, f"history[{i}].bought", errors)),
-        })
-
-    if isinstance(num_players, int) and len(opponents) > num_players - 1:
+    opponents = _parse_opponents(data.get("opponents", []), registry, errors)
+    history = _parse_history(data.get("history", []), registry, errors)
+    if len(opponents) > num_players - 1:
         errors.append(f"opponents: {len(opponents)} listed but only {num_players - 1} other player(s) in the game.")
 
     if errors:
         raise SnapshotError(errors)
 
-    turn = TurnState(
-        phase=phase,
-        hand=hand,
-        in_play=in_play,
-        actions=actions,
-        buys=buys,
-        coins=coins,
-        bought=bought,
-        merchants_played=merchants_played,
-        silver_played=bool(silver_played),
-        pending_draws=pending_draws,
-        unresolved=list(unresolved),
-    )
     return GameState(
         num_players=num_players,
         kingdom=kingdom,
@@ -474,32 +473,4 @@ def state_from_dict(
         draw_pile=draw_pile,
         discard_pile=discard_pile,
         planning_horizon=planning_horizon,
-    )
-
-
-def new_game_turn_state(
-    kingdom: list[str],
-    num_players: int,
-    hand: list[str],
-    registry: CardRegistry | None = None,
-    ruleset: Ruleset | None = None,
-) -> GameState:
-    """Build the state of a player's first turn (starting deck, full Supply)."""
-    registry = registry or load_registry()
-    ruleset = ruleset or load_ruleset()
-    supply = ruleset.starting_supply(kingdom, num_players, registry)
-    return GameState(
-        num_players=num_players,
-        kingdom=list(kingdom),
-        supply=supply,
-        turn=TurnState(
-            phase=Phase.ACTION,
-            hand=sorted(registry.resolve(h) for h in hand),
-            actions=ruleset.start_actions,
-            buys=ruleset.start_buys,
-            coins=ruleset.start_coins,
-        ),
-        turn_number=1,
-        owned_cards=dict(ruleset.starting_deck),
-        opponents=[OpponentInfo(name=f"Opponent {i + 1}", vp=3) for i in range(num_players - 1)],
     )

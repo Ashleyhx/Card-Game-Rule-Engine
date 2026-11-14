@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 
-from ..planning import CandidateEvaluation, ComparisonResult, PlanConfig, PlanResult
-from ..policy import Recommendation, RankedAction
-from ..rules import GameState, Issue, DominionRuleEngine
+from ..planning import CandidateEvaluation, ComparisonResult, PlanConfig, PlanResult, overall_method
+from ..policy import RankedAction, Recommendation
+from ..rules import DominionRuleEngine, GameState, Issue
 
 RULE = "-" * 72
 
@@ -102,13 +102,6 @@ METHOD_NAMES = {
     "mixed": "mixed: exact enumeration + Monte Carlo sampling",
     "none": "no search (nothing to evaluate)",
 }
-
-
-def _overall_method(cands: list[CandidateEvaluation]) -> str:
-    methods = {c.method for c in cands if c.method}
-    if not methods:
-        return "none"
-    return methods.pop() if len(methods) == 1 else "mixed"
 
 
 def plan_value(c: CandidateEvaluation) -> str:
@@ -221,7 +214,7 @@ def render_comparison(result: ComparisonResult, state: GameState, engine: Domini
                       description: str) -> str:
     legal = [c for c in result.candidates if c.legal]
     illegal = [c for c in result.candidates if not c.legal]
-    lines = _plan_header(state, engine, result.objective, description, result.horizon, _overall_method(legal),
+    lines = _plan_header(state, engine, result.objective, description, result.horizon, overall_method(legal),
                          result.information_level, [])
     if not legal:
         lines.append("No legal action to evaluate.")

@@ -84,9 +84,6 @@ class DominionRuleEngine:
             return [] if t.phase == Phase.BUY else ["End the Action phase first (the Buy phase always follows)."]
         return [f"Unknown action type {type(action).__name__}"]
 
-    def is_legal(self, state: GameState, action: Action) -> bool:
-        return not self.check(state, action)
-
     def legal_actions(self, state: GameState) -> list[Action]:
         if self.blocking_issues(state) or state.turn.phase == Phase.TURN_OVER:
             return []

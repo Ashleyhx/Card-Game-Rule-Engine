@@ -221,6 +221,55 @@ def test_multi_turn_example_continues_to_next_turn(tmp_path):
     assert [h["turn"] for h in snap["history"]] == [1, 2, 3]
 
 
+# A real save from a multi-turn interactive game (finished turn 4, with history).
+REAL_SAVE = {
+    "schema_version": 1, "num_players": 3, "turn_number": 4,
+    "kingdom": ["Cellar", "Market", "Merchant", "Militia", "Mine", "Moat", "Remodel", "Smithy", "Village", "Workshop"],
+    "supply": {"Copper": 38, "Silver": 35, "Gold": 30, "Estate": 12, "Duchy": 12, "Province": 12, "Curse": 20,
+               "Cellar": 10, "Market": 7, "Merchant": 10, "Militia": 10, "Mine": 10, "Moat": 8, "Remodel": 10,
+               "Smithy": 10, "Village": 10, "Workshop": 10},
+    "trash": [],
+    "player": {"name": "You", "phase": "turn_over", "hand": [], "in_play": [], "actions": 0, "buys": 0, "coins": 0,
+               "bought_this_turn": ["Silver"], "merchants_played": 0, "silver_played": False, "pending_draws": 0,
+               "unresolved": [], "owned_cards": {"Copper": 8, "Estate": 3, "Moat": 1, "Market": 2, "Silver": 1},
+               "deck_count": None, "discard_count": None},
+    "opponents": [{"name": "Opponent 1", "vp": 3, "owned_cards": None},
+                  {"name": "Opponent 2", "vp": 3, "owned_cards": None}],
+    "history": [
+        {"turn": 1, "hand": ["Copper", "Copper", "Estate", "Estate", "Estate"], "bought": ["Moat"]},
+        {"turn": 2, "hand": ["Copper", "Copper", "Copper", "Copper", "Copper"], "bought": ["Market"]},
+        {"turn": 3, "hand": ["Copper", "Copper", "Copper", "Market"], "bought": ["Market", "Copper"]},
+        {"turn": 4, "hand": ["Copper", "Copper", "Copper"], "bought": ["Silver"]},
+    ],
+}
+
+
+def test_real_save_resumes_into_the_next_turn(tmp_path):
+    path = tmp_path / "game.json"
+    path.write_text(json.dumps(REAL_SAVE))
+    answers = ["", "", "", "",                 # continue; Opponent 1 / 2 gained nothing; you gained nothing
+               "Market, Silver, Copper x3",    # turn-5 hand
+               "q"]
+    inp, _ = scripted(answers)
+    printed = []
+    assert interactive_main(DominionRuleEngine(), load=str(path), save=str(path),
+                            input_fn=inp, print_fn=printed.append) == 0
+    text = "\n".join(printed)
+    assert "Turn: 5" in text and "RECOMMENDED: Play Market" in text
+    assert "Bought so far: T1 Moat; T2 Market; T3 Copper, Market; T4 Silver" in text
+    assert json.loads(path.read_text())["turn_number"] == 5
+
+
+def test_game_ending_turn_stops_instead_of_continuing(tmp_path):
+    path = tmp_path / "end.json"
+    path.write_text(json.dumps(load_example("endgame_winning_province")))
+    inp, prompts = scripted(["", "", ""])  # play Treasures, buy the last Province, end turn
+    printed = []
+    assert interactive_main(DominionRuleEngine(), load=str(path), input_fn=inp, print_fn=printed.append) == 0
+    assert any(line.startswith("GAME OVER") for line in printed)
+    assert not any("Continue to your next turn" in p for p in prompts)
+
+
 def test_interactive_reprompts_on_bad_card_name():
     answers = ["2", "first", "", "y", "action", "Smithee", "Smithy", "", "skip", "", "q"]
     inp, _ = scripted(answers)
@@ -249,7 +298,7 @@ def test_interactive_eof_quits_cleanly():
 
 
 def test_runtime_is_fully_offline(monkeypatch, capsys):
-    """Every example must work with networking disabled."""
+    """Every example must work with networking disabled, and `recommend` / `plan --json` print valid JSON."""
     import socket
 
     def _no_network(*a, **k):
@@ -258,9 +307,9 @@ def test_runtime_is_fully_offline(monkeypatch, capsys):
     monkeypatch.setattr(socket, "socket", _no_network)
     monkeypatch.setattr(socket, "create_connection", _no_network)
     for name in example_names():
-        assert cardgame_main(["dominion", "recommend", "-e", name, "--json"]) == 0
-        assert cardgame_main(["dominion", "plan", "-e", name, "--json", "--nodes", "3000"]) == 0
-    capsys.readouterr()
+        for command in (["recommend", "-e", name, "--json"], ["plan", "-e", name, "--json", "--nodes", "3000"]):
+            assert cardgame_main(["dominion", *command]) == 0, (name, command)
+            json.loads(capsys.readouterr().out)
 
 
 # ---------------------------------------------------------------- lookahead planner: plan / compare
@@ -355,13 +404,6 @@ def test_plan_errors_reuse_exit_codes(tmp_path, capsys):
     bad.write_text(json.dumps({"num_players": 9, "kingdom": [], "player": {}}))
     code, _, err = run(capsys, "plan", str(bad))
     assert code == 1 and "num_players" in err
-
-
-@pytest.mark.parametrize("name", example_names())
-def test_plan_every_example(capsys, name):
-    code, out, _ = run(capsys, "plan", "-e", name, "--json", "--nodes", "3000")
-    assert code == 0
-    json.loads(out)
 
 
 def test_python_m_entry_point_runs_plan():

@@ -634,7 +634,8 @@ def _tie_note(tied: list[CandidateEvaluation], objective: Objective, horizon: st
             "not because it is better.")
 
 
-def _overall_method(cands: list[CandidateEvaluation]) -> str:
+def overall_method(cands: list[CandidateEvaluation]) -> str:
+    """The single evaluation method of these candidates, "mixed" if they differ, "none" if none was evaluated."""
     methods = {c.method for c in cands if c.method}
     if not methods:
         return "none"
@@ -708,7 +709,7 @@ def plan_next_action(state: GameState, config: PlanConfig | None = None,
     return PlanResult(
         recommended=recommended, alternatives=cands[1:], objective=su.objective.name,
         objective_description=su.objective.describe(), value_name=su.objective.value_name, horizon=su.horizon,
-        method=_overall_method(cands), information_level=su.level, information_notes=list(su.notes),
+        method=overall_method(cands), information_level=su.level, information_notes=list(su.notes),
         stats=stats.to_dict(), config=su.cfg.to_dict(), limitations=_limitations(su, cands, stats),
         explanation=explanation, blocked=blocked, tie=bool(tied), tied_actions=[c.action["label"] for c in tied],
     )

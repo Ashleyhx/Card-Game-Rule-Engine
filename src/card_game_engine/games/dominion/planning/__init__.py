@@ -27,6 +27,7 @@ from .planner import (
     compare_actions,
     evaluate_action_sequences,
     first_action_candidates,
+    overall_method,
     plan_next_action,
     projected_hand_count,
 )
@@ -53,6 +54,6 @@ __all__ = [
     "NextHandMoneyObjective", "Objective", "PurchaseObjective", "ThresholdObjective", "get_objective", "leaf_metrics",
     "value_is_lower_bound", "MAX_PROJECTED_HANDS", "TIE_TOLERANCE", "CandidateEvaluation",
     "ComparisonResult", "DominionPlanningModel", "OutcomeSummary", "PlanConfig", "PlanNode", "PlanResult",
-    "compare_actions", "evaluate_action_sequences", "first_action_candidates", "plan_next_action",
-    "projected_hand_count",
+    "compare_actions", "evaluate_action_sequences", "first_action_candidates", "overall_method",
+    "plan_next_action", "projected_hand_count",
 ]

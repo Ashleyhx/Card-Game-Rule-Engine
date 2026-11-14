@@ -11,8 +11,7 @@ from card_game_engine.games.dominion.cli.session_cli import (
     deduced_hand, fmt_p, interactive_session, load_session,
 )
 from card_game_engine.games.dominion.inference import to_game_state
-from card_game_engine.games.dominion.planning import PlanConfig
-from card_game_engine.games.dominion.rules import SnapshotError, action_to_dict, state_from_dict
+from card_game_engine.games.dominion.rules import action_to_dict
 from tests.dominion.conftest import FIRST_GAME
 
 
@@ -256,22 +255,6 @@ def test_interactive_quit_and_existing_file(game):
 
 # ---------------------------------------------------------------- fix: planning.horizon accepts hands:N
 
-@pytest.mark.parametrize("horizon", ["turn", "next_hand", "hands:1", "hands:4"])
-def test_snapshot_horizon_matches_plan_config(horizon):
-    snap = {"num_players": 2, "kingdom": FIRST_GAME, "player": {"hand": []}, "planning": {"horizon": horizon}}
-    assert state_from_dict(snap).planning_horizon == horizon
-    assert PlanConfig(horizon=horizon).horizon == horizon
-
-
-@pytest.mark.parametrize("horizon", ["hands:0", "hands:5", "hands:x", "week"])
-def test_snapshot_horizon_rejects_what_plan_config_rejects(horizon):
-    snap = {"num_players": 2, "kingdom": FIRST_GAME, "player": {"hand": []}, "planning": {"horizon": horizon}}
-    with pytest.raises(SnapshotError, match="planning.horizon"):
-        state_from_dict(snap)
-    with pytest.raises(ValueError):
-        PlanConfig(horizon=horizon)
-
-
 def test_deduced_hand_only_while_draws_pending(game, capsys):
     run(capsys, "hand", game, "4 Copper, Estate")
     run(capsys, "end-turn", game)
@@ -280,10 +263,33 @@ def test_deduced_hand_only_while_draws_pending(game, capsys):
     assert deduced_hand(load_session(game)) is None
 
 
-@pytest.mark.parametrize("content", ['{"events": "abc"}', "[1, 2]", '{"events": [5]}'])
+@pytest.mark.parametrize("content", ['{"events": "abc"}', "[1, 2]", '{"events": [5]}', '{"config": {}}'])
 def test_malformed_session_file_is_an_error_not_a_crash(tmp_path, capsys, content):
     path = tmp_path / "bad.json"
     path.write_text(content)
     code, _, err = run(capsys, "show", str(path))
     assert code in (1, 2) and ("not a session" in err or "must be a JSON object" in err)
     assert path.read_text() == content
+
+
+def test_unknown_draw_pile_is_not_presented_as_exact(tmp_path, capsys):
+    """A snapshot whose draw-pile contents are unknown must not report '1 possible hand (exact)' or E[$] = 0."""
+    snap = {"num_players": 2, "kingdom": FIRST_GAME, "turn_number": 4,
+            "player": {"phase": "buy", "hand": [], "coins": 0, "buys": 0,
+                       "owned_cards": {"Copper": 7, "Estate": 3, "Silver": 1}}}
+    src, f = tmp_path / "snap.json", tmp_path / "g.json"
+    src.write_text(json.dumps(snap))
+    code, _, _ = run(capsys, "start", str(f), "--from-snapshot", str(src))
+    assert code == 0
+    code, out, _ = run(capsys, "predict", str(f))
+    assert code == 0
+    assert "Not predictable" in out and "possible hands" not in out
+    code, data = run_json(capsys, "predict", str(f))
+    assert data["lower_bound"] is True
+
+
+def test_snapshot_file_is_not_mistaken_for_a_session(tmp_path, capsys):
+    snap = tmp_path / "game.json"
+    snap.write_text(json.dumps(load_example("opening_5_2")))
+    code, _, err = run(capsys, "show", str(snap))
+    assert code != 0 and "is a game snapshot, not a session file" in err and "--from-snapshot" in err

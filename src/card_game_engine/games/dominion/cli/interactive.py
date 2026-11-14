@@ -282,6 +282,8 @@ def _apply_gains(s: GameState, deltas: dict[str, int]) -> list[str]:
 
 def _start_next_turn(p: Prompter, engine: DominionRuleEngine, state: GameState) -> GameState:
     """Carry kingdom, Supply, your deck, trash and history into your next turn."""
+    # TODO: rebuild this multi-turn loop on top of inference.Session (see README, Roadmap item 1),
+    # so `interactive` and `session` share one game file and the snapshot `history` field can go.
     reg, rules = engine.registry, engine.ruleset
     s = state.copy()
     p.say("")

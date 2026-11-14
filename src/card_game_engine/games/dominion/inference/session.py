@@ -5,6 +5,7 @@ replay from the initial state. Recording returns a new Session and validates the
 by applying it: contradictions raise :class:`InconsistentObservation`, malformed or
 untrackable events raise :class:`IllegalEvent`, and the session is left unchanged.
 Resource and legality changes (play, buy, end turn) go through ``DominionRuleEngine``.
+Applying a single event lives in :mod:`.replay`; this module holds the session API and predictions.
 """
 
 from __future__ import annotations
@@ -13,83 +14,45 @@ import copy
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from functools import lru_cache
 from typing import Any, Mapping
 
 from ..planning import PlanConfig, PlanResult
 from ..planning import plan_next_action as _plan_on_state
-from ..rules.actions import Action, Buy, EndActionPhase, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure
-from ..rules.cards import UnknownCardError
-from ..rules.engine import DominionRuleEngine
-from ..rules.state import GameState, Phase, TurnState, state_from_dict
+from ..rules.state import GameState, Phase, state_from_dict
 from ..rules.validation import validate_state
 from ..rules.zones import (
     UNKNOWN_CARD,
     DiscardKnowledge,
     DrawPileKnowledge,
-    add_to_discard,
-    cleanup_zones,
     derive_zone_knowledge,
-    put_on_top,
+    expand_counts,
 )
 from .belief import (
     ENUMERATION_LIMIT,
     BeliefState,
-    Contradiction,
     World,
+    cleanup_world,
     collapse,
     counts,
     describe_counts,
-    determined_hand,
     draw_unobserved,
-    expand,
     fraction_str,
     map_worlds,
-    normalise,
-    observe_draw,
     outcome_count,
     predictive,
     sample_predictive,
-    take_from_discard,
-    take_from_hand,
 )
-from .events import (
-    EndTurnObservation,
-    Event,
-    IllegalEvent,
-    InconsistentObservation,
-    ObserveHand,
-    RecordDiscard,
-    RecordDraw,
-    RecordGain,
-    RecordPlay,
-    RecordPurchase,
-    RecordSupply,
-    RecordTrash,
-    event_from_dict,
-)
+from .events import Event, IllegalEvent, event_from_dict
+from .replay import OBSERVATION_TYPES, apply_event, shared_engine
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "num_players": 2, "kingdom": None, "player_name": "You", "max_worlds": 5000, "snapshot": None,
 }
-OBSERVATION_TYPES = (ObserveHand, RecordDraw, RecordSupply)
-COLLAPSE_FLAG = ("max_worlds exceeded: hidden states were collapsed to what is certain; other cards are "
-                 "unknown ('?'), so predictions are lower bounds")
-SUPPLY_FLAG = "Supply: other players' gains are not tracked; counts may be stale unless recorded with RecordSupply"
 MC_SAMPLES = 20_000
 
 
 class HandNotDetermined(ValueError):
     """Planning needs the current hand; it is not determined by the recorded observations."""
-
-
-class _Untrackable(ValueError):
-    """Becomes :class:`IllegalEvent` (with the event index)."""
-
-
-@lru_cache(maxsize=1)
-def _engine() -> DominionRuleEngine:
-    return DominionRuleEngine()
 
 
 # ---------------------------------------------------------------------------
@@ -112,11 +75,11 @@ class Session:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Session":
         """Rebuild and validate (by replay) a session from ``to_dict`` output."""
-        if not isinstance(data, Mapping) or not isinstance(data.get("events", []), list):
+        if not isinstance(data, Mapping) or not isinstance(data.get("events"), list):
             raise ValueError("not a session: expected a JSON object with an 'events' list")
         if data.get("domain", "dominion") != "dominion":
             raise ValueError(f"not a Dominion session: {data.get('domain')!r}")
-        session = cls(_check_config(data.get("config")), tuple(event_from_dict(e) for e in data.get("events", [])))
+        session = cls(_check_config(data.get("config")), tuple(event_from_dict(e) for e in data["events"]))
         infer_belief_state(session)
         return session
 
@@ -134,7 +97,7 @@ def _check_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _initial_belief(cfg: dict[str, Any]) -> BeliefState:
-    eng = _engine()
+    eng = shared_engine()
     if cfg["snapshot"] is not None:
         state = state_from_dict(copy.deepcopy(cfg["snapshot"]), eng.registry, eng.ruleset)
         errors = [i.message for i in validate_state(state, eng) if i.severity == "error"]
@@ -173,14 +136,14 @@ def infer_belief_state(session: Session) -> BeliefState:
     if session._belief is None:
         belief = _initial_belief(session.config)
         for i, event in enumerate(session.events):
-            belief = _apply(belief, event, i, session.config["max_worlds"])
+            belief = apply_event(belief, event, i, session.config["max_worlds"])
         object.__setattr__(session, "_belief", belief)
     return session._belief  # type: ignore[return-value]
 
 
 def record_event(session: Session, event: Event) -> Session:
     """Validate ``event`` against the tracked state and return a new Session that includes it."""
-    belief = _apply(infer_belief_state(session), event, len(session.events), session.config["max_worlds"])
+    belief = apply_event(infer_belief_state(session), event, len(session.events), session.config["max_worlds"])
     return Session(session.config, session.events + (event,), session.domain, belief)
 
 
@@ -218,330 +181,6 @@ def reset_session(session: Session) -> Session:
 def _check_index(session: Session, index: int) -> None:
     if not 0 <= index < len(session.events):
         raise IndexError(f"event index {index} out of range (0..{len(session.events) - 1})")
-
-
-# ---------------------------------------------------------------------------
-# Applying one event
-# ---------------------------------------------------------------------------
-
-def _apply(belief: BeliefState, event: Event, index: int, max_worlds: int) -> BeliefState:
-    kind = getattr(event, "kind", type(event).__name__)
-    try:
-        return _Step(belief, max_worlds).apply(event)
-    except Contradiction as e:
-        raise InconsistentObservation(index, kind, str(e)) from None
-    except (_Untrackable, UnknownCardError, TypeError) as e:
-        raise IllegalEvent(index, kind, str(e)) from None
-
-
-class _Step:
-    """Mutable working copy used while applying one event; ``result()`` freezes it."""
-
-    def __init__(self, b: BeliefState, max_worlds: int):
-        self.eng = _engine()
-        self.game = b.game.copy()
-        self.worlds = b.worlds
-        self.flags = list(b.flags)
-        self.notes = list(b.notes)
-        self.hand_observed = b.hand_observed
-        self.unverified_spend = b.unverified_spend
-        self.max_worlds = max_worlds
-
-    # helpers -------------------------------------------------------------
-    @property
-    def t(self) -> TurnState:
-        return self.game.turn
-
-    def note(self, text: str) -> None:
-        self.notes.append(f"Turn {self.game.turn_number}: {text}" if self.game.turn_number else text)
-
-    def flag(self, text: str) -> None:
-        if text not in self.flags:
-            self.flags.append(text)
-
-    def canon(self, cards: Any) -> Counter:
-        if isinstance(cards, str) or not all(isinstance(c, str) for c in cards):
-            raise _Untrackable("cards must be a list of card names")
-        return Counter(self.eng.registry.resolve(c) for c in cards)
-
-    def sync_hand(self) -> list[str] | None:
-        hand = determined_hand(self.worlds)
-        self.t.hand = list(hand) if hand is not None else []
-        return hand
-
-    def require_hand(self, what: str) -> list[str]:
-        hand = self.sync_hand()
-        if hand is None:
-            raise _Untrackable(f"cannot {what}: the current hand is not determined (record ObserveHand first)")
-        return hand
-
-    def set_worlds(self, worlds: tuple[World, ...], collapsed: bool = False) -> None:
-        self.worlds = worlds
-        if collapsed:
-            self.flag(COLLAPSE_FLAG)
-        self.sync_hand()
-
-    def check_owned(self, extra: Counter, with_hand: bool) -> None:
-        owned = self.game.owned_cards
-        if owned is None:
-            return
-        visible = Counter(self.t.in_play) + extra
-        if with_hand:
-            visible += Counter({c: n for c, n in collapse(self.worlds).hand if c != UNKNOWN_CARD})
-        over = [f"{visible[c]} {c} (only {owned.get(c, 0)} owned)" for c in sorted(extra) if visible[c] > owned.get(c, 0)]
-        if over:
-            raise Contradiction("more copies than exist in your deck: " + ", ".join(over))
-
-    def owned_add(self, card: str, n: int) -> None:
-        owned = self.game.owned_cards
-        if owned is None:
-            return
-        if owned.get(card, 0) + n < 0:
-            raise Contradiction(f"you own no {card} to remove")
-        owned[card] = owned.get(card, 0) + n
-        if not owned[card]:
-            del owned[card]
-
-    def take_supply(self, card: str) -> None:
-        if card not in self.game.supply:
-            raise Contradiction(f"{card} is not in this game's Supply")
-        if self.game.supply[card] <= 0:
-            raise Contradiction(f"the {card} pile is empty")
-        self.game.supply[card] -= 1
-
-    def unobserved_draw(self, n: int) -> None:
-        worlds, collapsed = draw_unobserved(self.worlds, n, self.max_worlds)
-        self.set_worlds(worlds, collapsed)
-        self.t.pending_draws = max(0, self.t.pending_draws - n)
-        self.hand_observed = False
-        hand = determined_hand(self.worlds)
-        if hand is None:
-            self.flag(f"Turn {self.game.turn_number}: {n} card(s) drawn but not observed; "
-                      f"the hand is a probability distribution over {len(self.worlds)} hidden state(s)")
-        else:
-            self.note(f"{n} unobserved card(s) drawn; hand deduced exactly: {describe_counts(Counter(hand))}.")
-
-    def engine_step(self, action: Action) -> None:
-        reasons = self.eng.check(self.game, action)
-        if reasons:
-            raise Contradiction(f"the rules do not allow '{action.describe()}' here: " + " ".join(reasons))
-        before = self.game
-        result = self.eng.apply(before, action)
-        self.game = result.state
-        self.note(" ".join(result.notes))
-        if isinstance(action, (PlayAction, PlayTreasure, PlayAllTreasures)):
-            hand = counts(self.game.turn.hand)
-            self.set_worlds(map_worlds(self.worlds, lambda w: replace(w, hand=hand)))
-        if isinstance(action, PlayAction):
-            gain = self.eng.card(action.throne_target or action.card).gain
-            if gain is not None:
-                gained = [gain.card] * (before.supply.get(gain.card, 0) - self.game.supply.get(gain.card, 0))
-                if gain.destination == "deck":
-                    self.set_worlds(map_worlds(self.worlds, lambda w: replace(w, draw=put_on_top(w.draw, gained))))
-                else:
-                    self.set_worlds(map_worlds(self.worlds,
-                                               lambda w: replace(w, discard=add_to_discard(w.discard, gained))))
-
-    def to_discard(self, cards: list[str]) -> None:
-        self.set_worlds(map_worlds(self.worlds, lambda w: replace(w, discard=add_to_discard(w.discard, cards))))
-
-    def drop_overcounted(self) -> None:
-        """Drop worlds with more known copies of a card than I own (a "?" matched to a card whose every copy
-        is known to be elsewhere); none left -> Contradiction."""
-        owned = self.game.owned_cards
-        if owned is None:
-            return
-        in_play = Counter(self.t.in_play)
-
-        def over(w: World) -> list[str]:
-            known = in_play + w.hand_counter + (w.zone_counter("draw_pile") or Counter()) \
-                + (w.zone_counter("discard_pile") or Counter())
-            return [f"{n} {c} (only {owned.get(c, 0)} owned)" for c, n in sorted(known.items())
-                    if c != UNKNOWN_CARD and n > owned.get(c, 0)]
-
-        kept = [w for w in self.worlds if not over(w)]
-        if not kept:
-            raise Contradiction("more copies than exist in your deck (counting cards known to be in other zones): "
-                                + ", ".join(over(self.worlds[0])))
-        if len(kept) < len(self.worlds):
-            self.worlds = normalise(kept)
-
-    def result(self) -> BeliefState:
-        self.drop_overcounted()
-        self.sync_hand()
-        return BeliefState(self.game, self.worlds, tuple(self.flags), tuple(self.notes),
-                           self.hand_observed, self.unverified_spend)
-
-    # dispatch ------------------------------------------------------------
-    def apply(self, e: Event) -> BeliefState:
-        handlers = {
-            ObserveHand: self._observe_hand, RecordDraw: self._record_draw, RecordPlay: self._record_play,
-            RecordPurchase: self._record_purchase, RecordGain: self._record_gain, RecordTrash: self._record_trash,
-            RecordDiscard: self._record_discard, RecordSupply: self._record_supply, EndTurnObservation: self._end_turn,
-        }
-        handler = handlers.get(type(e))  # type: ignore[arg-type]
-        if handler is None:
-            raise _Untrackable(f"unknown event type {type(e).__name__}")
-        if not isinstance(e, RecordSupply) and self.t.unresolved:
-            self.note("manual step(s) cleared - record their outcome with Gain/Trash/Discard/Draw events: "
-                      + " | ".join(self.t.unresolved))
-            self.t.unresolved = []
-        if self.t.pending_draws and not isinstance(e, OBSERVATION_TYPES):
-            self.note(f"{self.t.pending_draws} pending draw(s) were not recorded before '{e.kind}'.")
-            self.unobserved_draw(self.t.pending_draws)
-        handler(e)
-        return self.result()
-
-    def _observe_hand(self, e: ObserveHand) -> None:
-        observed = self.canon(e.cards)
-        self.check_owned(observed, with_hand=False)
-        self.set_worlds(*observe_draw(self.worlds, self.t.pending_draws, observed, True, self.max_worlds))
-        self.t.pending_draws = 0
-        self.hand_observed = True
-
-    def _record_draw(self, e: RecordDraw) -> None:
-        if (e.cards is None) == (e.count is None):
-            raise _Untrackable("give exactly one of 'cards' (observed) or 'count' (unobserved)")
-        if e.count is not None:
-            if not isinstance(e.count, int) or isinstance(e.count, bool) or e.count < 1:
-                raise _Untrackable("count must be a positive integer")
-            self.unobserved_draw(e.count)
-            return
-        observed = self.canon(e.cards)
-        if not observed:
-            raise _Untrackable("no cards given")
-        self.check_owned(observed, with_hand=True)
-        n = sum(observed.values())
-        self.set_worlds(*observe_draw(self.worlds, n, observed, False, self.max_worlds))
-        self.t.pending_draws = max(0, self.t.pending_draws - n)
-
-    def _record_play(self, e: RecordPlay) -> None:
-        card = self.eng.registry.resolve(e.card)
-        target = None if e.throne_target is None else self.eng.registry.resolve(e.throne_target)
-        self.require_hand(f"track playing {card}")
-        cdef = self.eng.card(card)
-        if cdef.is_treasure and not cdef.is_action:
-            if self.t.phase == Phase.ACTION:
-                self.engine_step(EndActionPhase())
-            self.engine_step(PlayTreasure(card))
-        else:
-            self.engine_step(PlayAction(card, target, e.trash_copper))
-
-    def _record_purchase(self, e: RecordPurchase) -> None:
-        card = self.eng.registry.resolve(e.card)
-        if self.t.phase == Phase.ACTION:
-            self.engine_step(EndActionPhase())
-        hand = self.sync_hand()
-        if hand is None or self.unverified_spend:
-            self._unverified_purchase(card)
-            return
-        if self.eng.check(self.game, Buy(card)) and not self.t.bought and any(
-                self.eng.card(c).is_treasure for c in hand):
-            self.engine_step(PlayAllTreasures())
-        reasons = self.eng.check(self.game, Buy(card))
-        if reasons:
-            raise Contradiction(f"impossible resource change - cannot buy {card}: " + " ".join(reasons))
-        self.engine_step(Buy(card))
-        self.to_discard([card])
-
-    def _unverified_purchase(self, card: str) -> None:
-        """Buy while the hand is undetermined: affordability is evidence about the hand (Bayes, 0/1 likelihood)."""
-        cdef, t = self.eng.card(card), self.t
-        if t.buys < 1:
-            raise Contradiction("impossible purchase: no Buys remaining")
-        need = self.unverified_spend + cdef.cost
-
-        def affordable(w: World) -> bool:
-            h = w.hand_counter
-            if h[UNKNOWN_CARD]:
-                return True
-            coins = t.coins + sum(self.eng.card(c).treasure_value * n for c, n in h.items())
-            if h["Silver"] and not t.silver_played:
-                coins += t.merchants_played
-            return coins >= need
-
-        kept = [w for w in self.worlds if affordable(w)]
-        if not kept:
-            raise Contradiction(f"impossible resource change: no possible hand pays ${need} for {card}")
-        self.take_supply(card)
-        self.set_worlds(normalise(kept))
-        t.buys -= 1
-        t.bought.append(card)
-        self.owned_add(card, 1)
-        self.unverified_spend = need
-        self.to_discard([card])
-        self.flag(f"Turn {self.game.turn_number}: bought {card} while the hand was not determined; coins are "
-                  "not tracked this turn (affordability was used as evidence about the hand)")
-
-    def _record_gain(self, e: RecordGain) -> None:
-        card = self.eng.registry.resolve(e.card)
-        if e.destination not in ("discard", "hand", "deck"):
-            raise _Untrackable("destination must be 'discard', 'hand' or 'deck'")
-        self.take_supply(card)
-        self.owned_add(card, 1)
-        if e.destination == "discard":
-            self.to_discard([card])
-        elif e.destination == "deck":
-            self.set_worlds(map_worlds(self.worlds, lambda w: replace(w, draw=put_on_top(w.draw, [card]))))
-        else:
-            self.set_worlds(map_worlds(self.worlds, lambda w: replace(w, hand=counts(w.hand_counter + Counter([card])))))
-        self.note(f"gained {card} to {e.destination}.")
-
-    def _record_trash(self, e: RecordTrash) -> None:
-        card = self.eng.registry.resolve(e.card)
-        if e.zone == "hand":
-            self.set_worlds(take_from_hand(self.worlds, Counter([card])))
-        elif e.zone == "in_play":
-            if card not in self.t.in_play:
-                raise Contradiction(f"there is no {card} in play")
-            self.t.in_play.remove(card)
-        elif e.zone == "discard":
-            self.set_worlds(take_from_discard(self.worlds, card))
-        else:
-            raise _Untrackable("zone must be 'hand', 'in_play' or 'discard'")
-        self.owned_add(card, -1)
-        self.game.trash.append(card)
-        self.note(f"trashed {card} from {e.zone}.")
-
-    def _record_discard(self, e: RecordDiscard) -> None:
-        cards = self.canon(e.cards)
-        self.set_worlds(take_from_hand(self.worlds, cards))
-        self.to_discard(expand(cards))
-        self.note(f"discarded {describe_counts(cards)} from hand.")
-
-    def _record_supply(self, e: RecordSupply) -> None:
-        pile = self.eng.registry.resolve(e.pile)
-        if pile not in self.game.supply:
-            raise Contradiction(f"{pile} is not in this game's Supply")
-        if not isinstance(e.count, int) or isinstance(e.count, bool) or e.count < 0:
-            raise _Untrackable("count must be a non-negative integer")
-        start = self.eng.ruleset.starting_pile_size(pile, self.game.num_players, self.eng.registry)
-        if e.count > start:
-            raise Contradiction(f"the {pile} pile starts with only {start} cards (observed {e.count})")
-        self.game.supply[pile] = e.count
-        self.note(f"Supply {pile} = {e.count} (observed; not used to infer your own gains).")
-
-    def _end_turn(self, e: EndTurnObservation) -> None:
-        if self.t.phase == Phase.ACTION:
-            self.engine_step(EndActionPhase())
-        in_play = list(self.t.in_play)
-        self.engine_step(EndTurn())
-
-        def cleanup(w: World) -> World:
-            h = w.hand_counter
-            unknown = h.pop(UNKNOWN_CARD, 0)
-            return World(w.weight, w.draw, cleanup_zones(w.discard, expand(h), in_play, unknown), ())
-
-        self.set_worlds(map_worlds(self.worlds, cleanup))
-        rules = self.eng.ruleset
-        self.game.turn = TurnState(phase=Phase.ACTION, hand=[], actions=rules.start_actions, buys=rules.start_buys,
-                                   coins=rules.start_coins, pending_draws=rules.hand_size)
-        if self.game.turn_number is not None:
-            self.game.turn_number += 1
-        self.hand_observed = False
-        self.unverified_spend = 0
-        if self.game.num_players > 1:
-            self.flag(SUPPLY_FLAG)
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +238,7 @@ class HandPrediction:
 def predict_next_hand(session: Session, top: int = 10) -> HandPrediction:
     """The pending start-of-turn hand, or else the next turn's hand assuming nothing more happens this turn."""
     b = infer_belief_state(session)
-    eng, t = _engine(), b.game.turn
+    eng, t = shared_engine(), b.game.turn
     worlds, notes = b.worlds, []
     if t.pending_draws and t.phase == Phase.ACTION and not t.in_play and all(not w.hand for w in worlds):
         which, turn, n = "start_of_turn", b.turn, t.pending_draws
@@ -609,12 +248,7 @@ def predict_next_hand(session: Session, top: int = 10) -> HandPrediction:
             notes.append(f"The {t.pending_draws} pending draw(s) are treated as unobserved.")
         in_play = list(t.in_play)
 
-        def cleanup(w: World) -> World:
-            h = w.hand_counter
-            unknown = h.pop(UNKNOWN_CARD, 0)
-            return World(w.weight, w.draw, cleanup_zones(w.discard, expand(h), in_play, unknown), ())
-
-        worlds = map_worlds(worlds, cleanup)
+        worlds = map_worlds(worlds, lambda w: cleanup_world(w, in_play))
         which, turn, n = "next_turn", None if b.turn is None else b.turn + 1, eng.ruleset.hand_size
         notes.append("Assumes no further plays, draws or gains this turn; hand and play go to the discard pile "
                      "at Clean-up.")
@@ -659,7 +293,7 @@ def to_game_state(session: Session) -> GameState:
     g = b.game.copy()
     hand = b.determined_hand()
     if hand is None:
-        g.turn.hand = expand(tuple((c, n) for c, n in w.hand if c != UNKNOWN_CARD))
+        g.turn.hand = expand_counts(tuple((c, n) for c, n in w.hand if c != UNKNOWN_CARD))
         g.assumptions.append("The hand is not determined; only cards certainly in hand are listed.")
     g.draw_pile = w.draw if w.draw.size_known else None
     g.deck_count = w.draw.size if w.draw.size_known else None
@@ -686,4 +320,4 @@ def plan_next_action(session: Session, config: PlanConfig | dict[str, Any] | Non
         raise HandNotDetermined("Cannot plan: coins this turn were not tracked (purchases recorded before the hand "
                                 "was known).")
     cfg = PlanConfig.from_dict(config) if isinstance(config, dict) else config
-    return _plan_on_state(to_game_state(session), cfg, _engine())
+    return _plan_on_state(to_game_state(session), cfg, shared_engine())

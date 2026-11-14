@@ -13,7 +13,8 @@ from card_game_engine.games.dominion.planning import (
 )
 from card_game_engine.games.dominion.policy import HeuristicPolicy
 from card_game_engine.games.dominion.rules import (
-    Buy, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure, action_from_dict, action_to_dict, state_from_dict,
+    Buy, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure, SnapshotError, action_from_dict, action_to_dict,
+    state_from_dict,
 )
 from tests.dominion.conftest import FIRST_GAME
 
@@ -562,3 +563,19 @@ def test_budget_cut_projection_is_a_lower_bound(engine):
     assert all(c.truncated and c.value_provenance == "lower_bound" for c in res.candidates)
     assert any("node budget cut off" in s for c in res.candidates for s in c.explanation)
     assert any("Not conclusive" in n for n in res.difference_notes) or res.tie
+
+
+@pytest.mark.parametrize("horizon", ["turn", "next_hand", "hands:1", "hands:4"])
+def test_snapshot_horizon_matches_plan_config(horizon):
+    snap = {"num_players": 2, "kingdom": FIRST_GAME, "player": {"hand": []}, "planning": {"horizon": horizon}}
+    assert state_from_dict(snap).planning_horizon == horizon
+    assert PlanConfig(horizon=horizon).horizon == horizon
+
+
+@pytest.mark.parametrize("horizon", ["hands:0", "hands:5", "hands:x", "week"])
+def test_snapshot_horizon_rejects_what_plan_config_rejects(horizon):
+    snap = {"num_players": 2, "kingdom": FIRST_GAME, "player": {"hand": []}, "planning": {"horizon": horizon}}
+    with pytest.raises(SnapshotError, match="planning.horizon"):
+        state_from_dict(snap)
+    with pytest.raises(ValueError):
+        PlanConfig(horizon=horizon)

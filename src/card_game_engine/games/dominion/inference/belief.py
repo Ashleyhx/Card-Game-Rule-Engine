@@ -22,7 +22,14 @@ from typing import Any, Callable, Iterable
 
 from ..planning.draws import count_draw_outcomes, enumerate_draws, sample_draw
 from ..rules.state import GameState
-from ..rules.zones import UNKNOWN_CARD, CardCounts, DiscardKnowledge, DrawPileKnowledge
+from ..rules.zones import (
+    UNKNOWN_CARD,
+    CardCounts,
+    DiscardKnowledge,
+    DrawPileKnowledge,
+    cleanup_zones,
+    expand_counts,
+)
 
 ZONES = ("hand", "draw_pile", "discard_pile")
 ENUMERATION_LIMIT = 200_000  # total draw outcomes enumerated in one step before collapsing / sampling
@@ -36,11 +43,6 @@ def counts(cards: Iterable[str] | Counter) -> CardCounts:
     """Canonical sorted ``((card, n), ...)`` with positive counts only."""
     c = cards if isinstance(cards, Counter) else Counter(cards)
     return tuple(sorted((k, n) for k, n in c.items() if n > 0))
-
-
-def expand(cc: CardCounts | Counter) -> list[str]:
-    items = sorted(cc.items()) if isinstance(cc, Counter) else cc
-    return [c for c, n in items for _ in range(n)]
 
 
 def fraction_str(f: Fraction) -> str:
@@ -145,13 +147,20 @@ def map_worlds(worlds: Iterable[World], fn: Callable[[World], World]) -> tuple[W
     return normalise(fn(w) for w in worlds)
 
 
+def cleanup_world(w: World, in_play: list[str]) -> World:
+    """Clean-up inside one world: the hand (known cards and '?') and the cards in play go to the discard pile."""
+    hand = w.hand_counter
+    unknown = hand.pop(UNKNOWN_CARD, 0)
+    return World(w.weight, w.draw, cleanup_zones(w.discard, expand_counts(hand), in_play, unknown), ())
+
+
 def determined_hand(worlds: Iterable[World]) -> list[str] | None:
     """The hand if it is the same in every world and contains no "?", else None."""
     hands = {w.hand for w in worlds}
     if len(hands) != 1:
         return None
     hand = hands.pop()
-    return None if any(c == UNKNOWN_CARD for c, _ in hand) else expand(hand)
+    return None if any(c == UNKNOWN_CARD for c, _ in hand) else expand_counts(hand)
 
 
 # ---------------------------------------------------------------------------
