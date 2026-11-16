@@ -29,6 +29,7 @@ class RankedAction:
     score: float
     reasons: list[str]
     warnings: list[str]
+    next_shuffle: dict[str, Any] | None = None  # exact "a/b" odds behind the "Next shuffle" reason
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class RankedAction:
             "score": round(self.score, 2),
             "reasons": self.reasons,
             "warnings": self.warnings,
+            "next_shuffle": self.next_shuffle,
         }
 
 
@@ -96,7 +98,8 @@ class HeuristicPolicy:
         # Stable, deterministic ordering: score desc, then label.
         scored.sort(key=lambda x: (-x[0], x[1].describe()))
         return [
-            RankedAction(rank=i + 1, action=a, score=total, reasons=sc.reasons, warnings=sc.warnings)
+            RankedAction(rank=i + 1, action=a, score=total, reasons=sc.reasons, warnings=sc.warnings,
+                         next_shuffle=sc.next_shuffle)
             for i, (total, a, sc) in enumerate(scored)
         ]
 

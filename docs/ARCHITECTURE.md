@@ -28,13 +28,14 @@ card_game_engine/
         │   ├── context.py       derived facts: stage, VP, deck stats, unknowns
         │   ├── weights.py       every strategy number in one place (heuristics, not rules)
         │   ├── scoring.py       score = sum of named, explained components
+        │   ├── odds.py          next-shuffle price-point odds per buy (exact, via planning.draws)
         │   └── heuristic.py     HeuristicPolicy: rank(), plan(), recommend() -> Recommendation
-        ├── planning/          LOOKAHEAD PLANNER (Phase 2) - expected values over exact draw outcomes
+        ├── planning/          LOOKAHEAD PLANNER - expected values over exact draw outcomes
         │   ├── draws.py         exact grouped draw enumeration (hypergeometric) + seeded sampling
         │   ├── transitions.py   PlanState + pure simulate_* transitions (engine.apply + zone updates)
         │   ├── evaluation.py    leaf metrics + objectives (money, threshold:N, next_hand_money, future_money, purchase)
         │   └── planner.py       DominionPlanningModel; plan_next_action, evaluate_action_sequences, compare_actions
-        ├── inference/         SESSION TRACKING (Phase 2b) - belief about MY hidden zones across turns
+        ├── inference/         SESSION TRACKING - belief about MY hidden zones across turns
         │   ├── events.py        typed JSON events (ObserveHand, RecordDraw/Play/Purchase/Gain/Trash/Discard/Supply,
         │   │                    EndTurnObservation); InconsistentObservation vs IllegalEvent
         │   ├── belief.py        World (weighted hypothesis), BeliefState, exact conditioning, predictive draws
@@ -47,7 +48,8 @@ card_game_engine/
 
 Dependencies only point one way: `cli → policy → rules → data`, `cli → planning → rules` and
 `cli → inference → planning, rules` (`planning` also reads `policy` weights, only for the heuristic
-`purchase` objective), and every game depends on `core`. `core` imports no game (the registry loads
+`purchase` objective; `policy.odds` uses only `planning.draws`/`planning.analysis`, which depend on
+`rules` alone, so the module graph stays acyclic), and every game depends on `core`. `core` imports no game (the registry loads
 games lazily by module path). A rule engine never imports a policy, the planner or `inference`;
 `planning` never imports `inference`. Shared vocabulary lives in the lower layer: e.g. the planning
 horizon names (`turn`, `next_hand`, `hands:N`) are validated by `rules.state.projected_hand_count`,
@@ -86,7 +88,7 @@ with player choices or hidden knowledge (Chapel, Remodel, Witch's attack, Vassal
 go to `unresolved`. While either is non-empty, `legal_actions()` returns `[]` and the CLI
 asks the user what happened. So every state the engine reasons about is *true*.
 
-## Lookahead planner (Phase 2)
+## Lookahead planner
 
 Three layers, each usable on its own:
 
@@ -136,7 +138,7 @@ The agent proposes, the engine checks (`engine.check` / `apply`), and the planne
 illegal candidates come back with the engine's reasons instead of a value, and a blocked state
 (pending draws, manual steps) gets no recommendation.
 
-## Session tracking and belief state (Phase 2b)
+## Session tracking and belief state
 
 `inference/` follows one real game from my seat. A `Session` is only a config and an event log; the
 `BeliefState` is a deterministic replay from the initial state (standard starting deck shuffled, or a
@@ -181,7 +183,7 @@ stores `Session.to_dict()` in a file (atomic writes), parses card lists, and ren
 It also presents a pending hand that the belief already determines as "Hand (deduced)" (the belief
 itself keeps the draw pending).
 
-## How future phases plug in (not implemented yet)
+## How future features plug in (not implemented yet)
 
 - **LLM tool-calling agent:** expose `get_game(id)`, `legal_actions`, `check`, `apply`,
   `recommend`, `plan_next_action`, `compare_actions` and the session API (`initialize_session`,

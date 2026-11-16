@@ -18,7 +18,8 @@
   decisions in future turns: each projected hand is a chance node (exact grouped draw
   enumeration, or sampling), then goes to the discard pile at its Clean-up
   (``simulate_projected_cleanup``) before the next one is drawn, reshuffling only when the
-  rules require it. Per projected hand, E[$] and P(hand >= $5) are reported.
+  rules require it. Per projected hand, E[$] and P(hand >= $5) are reported (plus P(hand has >= K
+  target cards) with the ``target:<T>>=<K>`` objective).
 
 For each root candidate a second pass follows the planner's own decisions (argmax with
 the same tie-breaking as the search) and records the distribution of leaf outcomes, so
@@ -42,7 +43,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from fractions import Fraction
 from typing import Any, Hashable
 
@@ -54,7 +55,7 @@ from ..rules.zones import derive_zone_knowledge
 from .draws import DrawOutcome, count_draw_outcomes, enumerate_draws, sample_draw
 from .evaluation import (
     METRIC_PROVENANCE, TIE_BREAK_WEIGHT, FutureMoneyObjective, MoneyObjective, NextHandMoneyObjective, Objective,
-    get_objective, leaf_label, leaf_metrics, tie_break, value_is_lower_bound,
+    TargetObjective, get_objective, leaf_label, leaf_metrics, tie_break, value_is_lower_bound,
 )
 from .transitions import (
     PlanState, from_game_state, pending_draws, simulate_action, simulate_draw, simulate_end_turn,
@@ -70,6 +71,13 @@ OPPONENTS_NOT_MODELLED = ("Opponent effects are not modelled: attacks only chang
 MONEY_BUY_NOTE = ("The 'money' objective does not judge which card to buy (coins generated do not depend on it; the "
                   "purchase is only a tie-break), so the Buy in the line is not buy advice: use the 'purchase' objective "
                   "(--objective purchase, heuristic) or `cardgame dominion recommend` for that.")
+TARGET_BUY_NOTE = ("The 'target:' objective does not judge which card to buy (it counts target cards in hand and in "
+                   "play, or in the first projected hand, which a bought card reaches only through a reshuffle; "
+                   "otherwise the purchase is only a tie-break), so the Buy in the line is not buy advice: use the "
+                   "'purchase' objective (--objective purchase, heuristic) or `cardgame dominion recommend` for that.")
+TIE_HINT = "try another objective or a longer horizon"
+TARGET_TIE_HINT = ("the 'target:' value counts only the first projected hand, so a longer horizon does not change it: "
+                   "compare the per-hand target probabilities P(target) of the projected hands, or try another objective")
 INCONCLUSIVE = ("lower_bound", "partial")
 
 
@@ -207,7 +215,8 @@ class DominionPlanningModel:
         k = s.key()
         m = self._metrics.get(k)
         if m is None:
-            m = leaf_metrics(s.turn_view, s.ps, self.engine, self.root.ps)
+            target = self.objective.target if isinstance(self.objective, TargetObjective) else None
+            m = leaf_metrics(s.turn_view, s.ps, self.engine, self.root.ps, target)
             m["objective_value"] = self.objective.utility(m)
             self._metrics[k] = m
         return m
@@ -338,7 +347,8 @@ class CandidateEvaluation:
     threshold_provenance: str | None = None  # "exact" | "monte_carlo" | "lower_bound" | "partial" | None
     # One dict per projected hand (horizon next_hand / hands:N): hand, expected_coins, p_at_least_5, provenance
     # (as threshold_provenance), p_lower_bound, and expected_coins_exact / p_at_least_5_exact (fraction strings,
-    # only when the distribution is exact).
+    # only when the distribution is exact); with the target objective also target ("Treasure>=3"), p_target
+    # and p_target_exact (P(the hand has >= K target cards)).
     projected_hands: list[dict[str, Any]] = field(default_factory=list)
     boundaries: dict[str, float] = field(default_factory=dict)
     flags: dict[str, float] = field(default_factory=dict)
@@ -423,6 +433,8 @@ def _setup(state: GameState, config: PlanConfig | None, engine: DominionRuleEngi
     if isinstance(objective, FUTURE_OBJECTIVES) and projected_hand_count(horizon) == 0:
         raise ValueError(f"The {objective.name} objective needs horizon 'next_hand' or 'hands:N' "
                          f"(1 <= N <= {MAX_PROJECTED_HANDS}).")
+    if isinstance(objective, TargetObjective):
+        objective = replace(objective, hands=projected_hand_count(horizon))  # utility: this turn or the next hand
     draw, _, notes = derive_zone_knowledge(state, engine.registry)
     root = PlanNode(from_game_state(state, engine))
     return _Setup(engine, cfg, objective, horizon, root, draw.level.value, notes)
@@ -450,26 +462,32 @@ def _hands_text(c: CandidateEvaluation) -> str:
     parts = []
     for h in c.projected_hands:
         op = " >= " if h["provenance"] == "lower_bound" else "="
+        target = f", P({h['target']}){op}{h['p_target']:.2f}" if "p_target" in h else ""
         parts.append(f"hand {h['hand']} E[$]{op}{h['expected_coins']:.2f}, "
-                     f"P($>={HAND_THRESHOLD}){op}{h['p_at_least_5']:.2f} ({h['provenance']})")
+                     f"P($>={HAND_THRESHOLD}){op}{h['p_at_least_5']:.2f}{target} ({h['provenance']})")
     return "; ".join(parts)
 
 
-def _hand_stats(groups: list, n_hands: int, prov: str, flags: dict[str, float]) -> list[dict[str, Any]]:
-    """E[$] and P(hand >= $5) per projected hand from the grouped leaf distribution.
+def _hand_stats(groups: list, n_hands: int, prov: str, flags: dict[str, float],
+                objective: Objective | None = None) -> list[dict[str, Any]]:
+    """E[$] and P(hand >= $5) per projected hand from the grouped leaf distribution (and, for a
+    ``TargetObjective``, P(hand has >= K target cards)).
 
     A leaf that did not reach hand i (boundary or cut-off) contributes $0 to it, which makes
     that hand's numbers lower bounds (``p_lower_bound`` > 0), like owed or unknown cards.
     """
+    target = objective if isinstance(objective, TargetObjective) else None
     out = []
     for i in range(n_hands):
-        expected = p_five = p_lower = Fraction(0)
+        expected = p_five = p_lower = p_target = Fraction(0)
         for _, (p, m) in groups:
             coins = m.get("hand_coins", [])
             if i < len(coins):
                 expected += p * coins[i]
                 p_five += p if coins[i] >= HAND_THRESHOLD else 0
                 p_lower += p if m["hand_coins_is_lower_bound"][i] else 0
+                if target is not None:
+                    p_target += p if m["hand_target_counts"][i] >= target.k else 0
             else:
                 p_lower += p
         if flags.get("p_manual_boundary"):
@@ -485,6 +503,9 @@ def _hand_stats(groups: list, n_hands: int, prov: str, flags: dict[str, float]) 
             "expected_coins_exact": str(expected) if exact else None,
             "p_at_least_5_exact": str(p_five) if exact else None,
         })
+        if target is not None:
+            out[-1].update(target=f"{target.target.name}>={target.k}", p_target=float(p_target),
+                           p_target_exact=str(p_target) if exact else None)
     return out
 
 
@@ -492,11 +513,18 @@ def _line_has_buy(c: CandidateEvaluation) -> bool:
     return any(step.startswith("Buy ") for step in c.principal_line)
 
 
-def _inconclusive_note(best: CandidateEvaluation, other: CandidateEvaluation, value_name: str) -> str | None:
+def _unknown_counted(objective: Objective | None) -> str:
+    """How the objective scores unknown ("?") or unreached cards, for lower-bound wording."""
+    return "as non-matching" if isinstance(objective, TargetObjective) else "as $0"
+
+
+def _inconclusive_note(best: CandidateEvaluation, other: CandidateEvaluation, value_name: str,
+                       objective: Objective | None = None) -> str | None:
     """Why ``best`` ranking above ``other`` is not a conclusive comparison (None if it is)."""
     b, o = best.action["label"], other.action["label"]
     if other.value_provenance == "lower_bound":
-        return (f"Not conclusive: {o}'s {value_name} is only a lower bound (unknown cards counted as $0), "
+        return (f"Not conclusive: {o}'s {value_name} is only a lower bound (unknown cards counted "
+                f"{_unknown_counted(objective)}), "
                 f"so it may be as good as or better than {b}.")
     if other.value_provenance == "partial":
         return (f"Not conclusive: {o}'s {value_name} is partial (a player choice is not modelled and was evaluated "
@@ -557,12 +585,13 @@ def _evaluate_candidate(model: DominionPlanningModel, su: _Setup, av: ActionValu
             c.threshold_provenance = "lower_bound"
         else:
             c.threshold_provenance = prov
-        c.projected_hands = _hand_stats(groups, model.hands, prov, c.flags)
+        c.projected_hands = _hand_stats(groups, model.hands, prov, c.flags, objective)
     if objective.provenance == "heuristic":
         c.value_provenance = "heuristic"
     elif c.flags.get("p_manual_boundary"):
         c.value_provenance = "partial"
-    elif c.flags.get("p_value_lower_bound") or (av.truncated and isinstance(objective, FUTURE_OBJECTIVES)):
+    elif c.flags.get("p_value_lower_bound") or (av.truncated and (isinstance(objective, FUTURE_OBJECTIVES) or (
+            isinstance(objective, TargetObjective) and objective.hands))):
         # A budget cut-off before the projection ends scores the hands it did not reach as $0.
         c.value_provenance = "lower_bound"
     elif av.method != "exact":
@@ -583,10 +612,11 @@ def _candidate_explanation(c: CandidateEvaluation, objective: Objective) -> list
     out = [f"{c.action['label']}: {_value_text(c, objective.value_name)} ({c.value_provenance})."]
     if c.value_provenance == "lower_bound" and c.flags.get("p_value_lower_bound"):
         out.append(f"This value is a lower bound: with probability {c.flags['p_value_lower_bound']:.2f} the line "
-                   "reaches cards of unknown identity, which are counted as $0.")
+                   f"reaches cards of unknown identity, which are counted {_unknown_counted(objective)}.")
     if c.value_provenance == "lower_bound" and c.truncated:
+        unreached = "match nothing" if isinstance(objective, TargetObjective) else "count $0"
         out.append("This value is a lower bound: the node budget cut off part of the search, and projected hands "
-                   "it did not reach count $0 (raise --nodes or shorten the horizon).")
+                   f"it did not reach {unreached} (raise --nodes or shorten the horizon).")
     elif c.value_provenance == "partial":
         out.append(f"This value is partial: with probability {c.flags['p_manual_boundary']:.2f} the line reaches a "
                    "player choice that is not modelled; it is evaluated as if that choice did nothing.")
@@ -627,9 +657,10 @@ def _tied(cands: list[CandidateEvaluation]) -> list[CandidateEvaluation]:
 
 def _tie_note(tied: list[CandidateEvaluation], objective: Objective, horizon: str) -> str:
     labels = ", ".join(c.action["label"] for c in tied)
+    hint = TARGET_TIE_HINT if isinstance(objective, TargetObjective) and objective.hands else TIE_HINT
     return (f"TIE: no difference under objective {objective.name} (horizon {horizon}) between {labels} "
             f"({_value_text(tied[0], objective.value_name)}); the decision is beyond this objective/horizon "
-            f"(try another objective or a longer horizon). {tied[0].action['label']} is listed first only by the "
+            f"({hint}). {tied[0].action['label']} is listed first only by the "
             "documented tie-break (more coins generated, then more cards drawn, more coins spent, more Buys kept), "
             "not because it is better.")
 
@@ -653,12 +684,15 @@ def _limitations(su: _Setup, cands: list[CandidateEvaluation], stats: SearchStat
     out.append(f"Information level: {su.level}. " + " ".join(su.notes))
     if isinstance(su.objective, MoneyObjective) and any(_line_has_buy(c) for c in cands):
         out.append(MONEY_BUY_NOTE)
+    if isinstance(su.objective, TargetObjective) and any(_line_has_buy(c) for c in cands):
+        out.append(TARGET_BUY_NOTE)
     for c in cands:
         for reason, p in c.boundaries.items():
             if reason.startswith("manual:"):
                 effect = "the choice is not modelled, so the value is partial (evaluated as if the choice did nothing)"
             elif c.flags.get("p_value_lower_bound") or su.objective.provenance == "heuristic":
-                effect = "cards still owed are unknown, so the value is a lower bound (they count $0)"
+                they = "are counted as non-matching" if isinstance(su.objective, TargetObjective) else "count $0"
+                effect = f"cards still owed are unknown, so the value is a lower bound (they {they})"
             else:
                 effect = f"cards still owed are unknown, which does not affect this objective's {su.objective.value_name}"
             out.append(f"{c.action['label']}: hidden information / manual choice boundary '{reason}' reached with "
@@ -735,7 +769,7 @@ def _plan_explanation(su: _Setup, cands: list[CandidateEvaluation]) -> list[str]
             out.append(f"{best.action['label']}: {_thresholds_text(best)}; {nxt.action['label']}: {_thresholds_text(nxt)}.")
         if best.projected_hands and nxt.projected_hands:
             out.append(f"{best.action['label']}: {_hands_text(best)}. {nxt.action['label']}: {_hands_text(nxt)}.")
-        out.extend(note for c in cands[1:] if (note := _inconclusive_note(best, c, vn)))
+        out.extend(note for c in cands[1:] if (note := _inconclusive_note(best, c, vn, su.objective)))
     else:
         out.append(f"Recommended {best.action['label']} (the only candidate): {_value_text(best, vn)}.")
     out.extend(best.explanation[1:])
@@ -805,7 +839,7 @@ def compare_actions(state: GameState, candidates: list[Action | dict[str, Any]] 
             if best.projected_hands and c.projected_hands:
                 note += f"; {_hands_text(best)} vs {_hands_text(c)}"
             notes.append(note + ".")
-            inconclusive = _inconclusive_note(best, c, vn)
+            inconclusive = _inconclusive_note(best, c, vn, su.objective)
             if inconclusive:
                 notes.append(inconclusive)
     notes.extend(f"{c.action.get('label', c.action_key)}: not evaluated (illegal: {' '.join(c.illegal_reasons)})"

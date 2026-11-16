@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..rules import (
     Action, Buy, CardDef, EndActionPhase, EndTurn, GameState, PlayAction, PlayAllTreasures, PlayTreasure, DominionRuleEngine,
 )
 from . import weights as W
 from .context import GameContext
+from .odds import ShuffleOdds, ShuffleOddsModel
 
 
 @dataclass
@@ -21,6 +23,7 @@ class Score:
     total: float = 0.0
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    next_shuffle: dict[str, Any] | None = None  # structured odds behind a "Next shuffle" component
 
     def add(self, value: float, reason: str | None = None) -> None:
         self.total += value
@@ -38,6 +41,7 @@ class Score:
 class HeuristicScorer:
     def __init__(self, engine: DominionRuleEngine):
         self.engine = engine
+        self.odds = ShuffleOddsModel(engine.registry)
 
     # ------------------------------------------------------------------
     def score(self, state: GameState, ctx: GameContext, action: Action) -> Score:
@@ -77,6 +81,13 @@ class HeuristicScorer:
             s.note(f"Pass: spend nothing (${t.coins} and {t.buys} Buy(s) unused). Keeps your deck lean.")
         else:
             s.note("No Buys left - ending the turn is the only option.")
+        if ctx.deck is not None and ctx.deck.total:
+            now = self.odds.odds(ctx.deck.counts)
+            points = W.NEXT_SHUFFLE_PRICE_WEIGHTS[ctx.stage]
+            s.note(f"Next shuffle as is ({now.deck_size} cards): "
+                   + ", ".join(f"P($>={p}) {float(now.p_at_least[p]):.0%}" for p in points)
+                   + f"; E[$] {float(now.expected_coins):.2f}{_mc_label(now)}.")
+            s.next_shuffle = {"method": now.method, "buy_nothing": now.to_dict()}
         return s
 
     def _score_buy(self, state: GameState, ctx: GameContext, name: str) -> Score:
@@ -102,8 +113,33 @@ class HeuristicScorer:
         else:
             self._score_kingdom_buy(state, ctx, card, s)
 
+        self._next_shuffle(ctx, card, s)
         self._endgame_adjustments(state, ctx, card, s)
         return s
+
+    def _next_shuffle(self, ctx: GameContext, card: CardDef, s: Score) -> None:
+        """Money density / price points: next-shuffle odds with vs without this card (policy/odds.py)."""
+        deck = ctx.deck
+        if deck is None or not deck.total:
+            money = W.TYPICAL_MONEY_VALUE.get(card.name, {}).get(ctx.stage)
+            if money:
+                s.add(money, f"Typical money value of {card.name} (deck unknown: next-shuffle odds not computed).")
+            return
+        now = self.odds.odds(deck.counts)
+        after = self.odds.odds(deck.counts + Counter({card.name: 1}))
+        points = W.NEXT_SHUFFLE_PRICE_WEIGHTS[ctx.stage]
+        weight = W.NEXT_SHUFFLE_WEIGHT * (W.KINGDOM_NEXT_SHUFFLE_SHARE if card.kingdom else 1.0)
+        value = weight * sum(w * float(after.p_at_least[p] - now.p_at_least[p]) for p, w in points.items())
+        s.add(value, "Next shuffle: "
+              + ", ".join(f"P($>={p}) {float(now.p_at_least[p]):.0%}->{float(after.p_at_least[p]):.0%}" for p in points)
+              + f"; E[$] {float(now.expected_coins):.2f}->{float(after.expected_coins):.2f}{_mc_label(after)}.")
+        s.next_shuffle = {
+            "method": "exact" if now.method == after.method == "exact" else "monte_carlo",
+            "buy_nothing": now.to_dict(),
+            "after_buy": after.to_dict(),
+            "price_weights": {str(p): w for p, w in points.items()},
+            "score": round(value, 2),
+        }
 
     def _score_kingdom_buy(self, state: GameState, ctx: GameContext, card: CardDef, s: Score) -> None:
         stage, deck = ctx.stage, ctx.deck
@@ -163,8 +199,14 @@ class HeuristicScorer:
             elif stage != "early" or deck.total > 14:
                 s.add(-4.0, "Trashing pays off mostly in the opening turns.")
         elif n == "Moat":
-            if any(self.engine.card(k).is_attack for k in state.kingdom):
-                s.add(1.5, "Attacks are in this kingdom; Moat defends.")
+            attacks = [k for k in state.kingdom if k in W.MOAT_DEFENCE]
+            if attacks:
+                worst = max(attacks, key=lambda k: W.MOAT_DEFENCE[k])
+                opponents = max(1, state.num_players - 1)
+                value = W.MOAT_DEFENCE[worst] * (1 + W.MOAT_DEFENCE_PER_EXTRA_OPPONENT * (opponents - 1))
+                why = {"Witch": "a junking attack", "Militia": "a mild attack"}.get(worst, "a moderate attack")
+                s.add(value, f"Moat blocks {worst} ({why}) from {opponents} opponent(s); "
+                             "otherwise a terminal +2 Cards, notably weaker than Smithy.")
         elif n == "Merchant" and deck.counts.get("Silver", 0) >= 2:
             s.add(0.5, "You own several Silvers for Merchant.")
         elif n == "Workshop" and "Gardens" in state.kingdom:
@@ -255,7 +297,7 @@ class HeuristicScorer:
             if atk:
                 s.add(atk, f"{pre}attack hurts opponents.")
         if card.gain and state.supply.get(card.gain.card, 0) > 0:
-            v = max(0.5, W.BASIC_BUY_VALUE[card.gain.card][ctx.stage] * 0.6)
+            v = max(0.5, W.typical_basic_value(card.gain.card, ctx.stage) * 0.6)
             s.add(v, f"{pre}gains a {card.gain.card}.")
 
         n = card.name
@@ -348,3 +390,7 @@ class HeuristicScorer:
         if card.manual_steps or (card.special == "throne_room" and self.engine.card(action.throne_target).manual_steps):
             s.note("Part of this card's effect needs your choices; the engine will ask you to resolve it.")
         return s
+
+
+def _mc_label(odds: ShuffleOdds) -> str:
+    return " (Monte Carlo estimate)" if odds.method == "monte_carlo" else ""

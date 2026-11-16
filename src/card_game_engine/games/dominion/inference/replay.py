@@ -22,6 +22,7 @@ from .belief import (
     World,
     cleanup_world,
     collapse,
+    condition,
     counts,
     describe_counts,
     determined_hand,
@@ -50,6 +51,9 @@ from .events import (
 OBSERVATION_TYPES = (ObserveHand, RecordDraw, RecordSupply)
 COLLAPSE_FLAG = ("max_worlds exceeded: hidden states were collapsed to what is certain; other cards are "
                  "unknown ('?'), so predictions are lower bounds")
+UNIDENTIFIED_FLAG = ("an observation may have matched unknown ('?') cards, which carry no prior: only what is "
+                     "certain was kept (cards that may have left the pile became '?', differing hidden states "
+                     "were merged), so predictions are ranges")
 SUPPLY_FLAG = "Supply: other players' gains are not tracked; counts may be stale unless recorded with RecordSupply"
 
 
@@ -114,10 +118,12 @@ class _Step:
             raise _Untrackable(f"cannot {what}: the current hand is not determined (record ObserveHand first)")
         return hand
 
-    def set_worlds(self, worlds: tuple[World, ...], collapsed: bool = False) -> None:
+    def set_worlds(self, worlds: tuple[World, ...], collapsed: bool = False, unidentified: bool = False) -> None:
         self.worlds = worlds
         if collapsed:
             self.flag(COLLAPSE_FLAG)
+        if unidentified:
+            self.flag(UNIDENTIFIED_FLAG)
         self.sync_hand()
 
     def check_owned(self, extra: Counter, with_hand: bool) -> None:
@@ -290,20 +296,22 @@ class _Step:
             raise Contradiction("impossible purchase: no Buys remaining")
         need = self.unverified_spend + cdef.cost
 
-        def affordable(w: World) -> bool:
+        def affordable(w: World) -> bool | None:
+            """None: only if a "?" card in the hand is a Treasure."""
             h = w.hand_counter
-            if h[UNKNOWN_CARD]:
-                return True
+            unknown = h.pop(UNKNOWN_CARD, 0)
             coins = t.coins + sum(self.eng.card(c).treasure_value * n for c, n in h.items())
             if h["Silver"] and not t.silver_played:
                 coins += t.merchants_played
-            return coins >= need
+            return True if coins >= need else (None if unknown else False)
 
-        kept = [w for w in self.worlds if affordable(w)]
+        verdicts = [(w, affordable(w)) for w in self.worlds]
+        kept = [w for w, ok in verdicts if ok is not False]
         if not kept:
             raise Contradiction(f"impossible resource change: no possible hand pays ${need} for {card}")
         self.take_supply(card)
-        self.set_worlds(normalise(kept))
+        worlds, merged = condition(kept, any(ok is None for _, ok in verdicts))
+        self.set_worlds(worlds, unidentified=merged)
         t.buys -= 1
         t.bought.append(card)
         self.owned_add(card, 1)
@@ -329,13 +337,15 @@ class _Step:
     def _record_trash(self, e: RecordTrash) -> None:
         card = self.eng.registry.resolve(e.card)
         if e.zone == "hand":
-            self.set_worlds(take_from_hand(self.worlds, Counter([card])))
+            worlds, merged = take_from_hand(self.worlds, Counter([card]))
+            self.set_worlds(worlds, unidentified=merged)
         elif e.zone == "in_play":
             if card not in self.t.in_play:
                 raise Contradiction(f"there is no {card} in play")
             self.t.in_play.remove(card)
         elif e.zone == "discard":
-            self.set_worlds(take_from_discard(self.worlds, card))
+            worlds, merged = take_from_discard(self.worlds, card)
+            self.set_worlds(worlds, unidentified=merged)
         else:
             raise _Untrackable("zone must be 'hand', 'in_play' or 'discard'")
         self.owned_add(card, -1)
@@ -344,7 +354,8 @@ class _Step:
 
     def _record_discard(self, e: RecordDiscard) -> None:
         cards = self.canon(e.cards)
-        self.set_worlds(take_from_hand(self.worlds, cards))
+        worlds, merged = take_from_hand(self.worlds, cards)
+        self.set_worlds(worlds, unidentified=merged)
         self.to_discard(expand_counts(cards))
         self.note(f"discarded {describe_counts(cards)} from hand.")
 

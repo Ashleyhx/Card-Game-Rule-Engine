@@ -293,3 +293,73 @@ def test_snapshot_file_is_not_mistaken_for_a_session(tmp_path, capsys):
     snap.write_text(json.dumps(load_example("opening_5_2")))
     code, _, err = run(capsys, "show", str(snap))
     assert code != 0 and "is a game snapshot, not a session file" in err and "--from-snapshot" in err
+
+
+# ---------------------------------------------------------------- Phase 2c: deck / draws / guaranteed / analyze
+
+def test_session_draws_guaranteed_and_deck(game, capsys):
+    before = open(game, "rb").read()
+    code, out, _ = run(capsys, "draws", game, "--count", "5", "--target", "copper")
+    assert code == 0 and "Copper in the next 5 card(s) - drawn from the current piles (turn 1)" in out
+    assert "  3    5/12 = 0.417" in out and "E[count]: 7/2 = 3.500" in out and "no Clean-up" in out
+    run(capsys, "hand", game, "4 Copper, Estate")
+    code, data = run_json(capsys, "draws", game, "--count", "2", "--target", "Copper", "--at", "now")
+    assert code == 0 and data["at"] == "now" and data["method"] == "exact"
+    assert [d["p_exact"] for d in data["distribution"]] == ["1/10", "3/5", "3/10"]
+    assert data["p_at_least_one"]["p_exact"] == "9/10" and data["upper"] is None
+
+    code, out, _ = run(capsys, "guaranteed", game, "--count", "7")
+    assert code == 0 and "next turn, after this turn's Clean-up (turn 2)" in out
+    assert "Guaranteed: at least 4 Copper, at least 2 Estate, at least 4 Treasure, at least 2 Victory" in out
+    assert "P(reshuffle while drawing): 1" in out and out.isascii()
+    code, data = run_json(capsys, "guaranteed", game)
+    assert [g["text"] for g in data["guarantees"]] == ["exactly 3 Copper", "exactly 2 Estate", "exactly 3 Treasure",
+                                                       "exactly 2 Victory"]
+
+    code, out, _ = run(capsys, "deck", game)
+    assert code == 0 and "Draw pile (deduced, 5 cards):" in out and "Hand (observed, 5 cards):" in out
+    code, data = run_json(capsys, "deck", game)
+    assert data["zones"]["draw_pile"]["cards"][0] == {"name": "Copper", "kind": "card", "status": "deduced",
+                                                      "certain": 3, "min": 3, "max": 3,
+                                                      "expected": {"exact": "3/1", "value": 3.0}}
+    run(capsys, "draw", game, "--count", "2")  # unseen draws: the hand becomes a distribution
+    code, out, _ = run(capsys, "deck", game)
+    assert "probabilistic, E[known]" in out and "P(count):" in out
+
+    code, _, err = run(capsys, "draws", game, "--count", "2", "--target", "Treasr")
+    assert code == 2 and "Did you mean: Treasure?" in err
+    with pytest.raises(SystemExit) as exc:  # argparse rejects an unknown --at
+        run(capsys, "draws", game, "--count", "2", "--target", "Copper", "--at", "later")
+    assert exc.value.code == 2
+    assert len(load_session(game).events) == 2 and before != open(game, "rb").read()
+
+
+def run_analyze(capsys, *argv):
+    code = cardgame_main(["dominion", "analyze", *argv])
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_stateless_analyze(capsys, tmp_path):
+    code, out, _ = run_analyze(capsys, "-e", "partial_knowledge", "--count", "3", "--target", "Treasure", "--at", "now")
+    assert code == 0 and "Treasure (type) in the next 3 card(s)" in out
+    assert "  2    [1/5 = 0.200, 9/10 = 0.900]" in out and "E[count]: [9/5 = 1.800, 13/5 = 2.600]" in out
+    code, out, _ = run_analyze(capsys, "-e", "partial_knowledge", "--count", "3", "--target", "Treasure", "--at",
+                               "now", "--json")
+    data = json.loads(out)
+    assert data["bounded"] and data["bounds"]["p_at_least_one"][0]["p_exact"] == "1/1"
+    assert data["upper"]["expected"]["exact"] == "13/5"
+
+    code, out, _ = run_analyze(capsys, "-e", "partial_knowledge", "--at", "now")
+    assert code == 0 and "Guaranteed: at least 1 Copper, at least 1 Gold, at least 2 Treasure" in out
+
+    code, out, _ = run_analyze(capsys, "-e", "unknown_deck_minimal", "--target", "Copper")
+    assert code == 0 and "Not determinable" in out and "P(" not in out
+    code, out, _ = run_analyze(capsys, "-e", "unknown_deck_minimal", "--target", "Copper", "--json")
+    assert json.loads(out)["determinable"] is False and json.loads(out)["distribution"] is None
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"num_players": 2, "kingdom": FIRST_GAME,
+                               "player": {"phase": "action", "hand": ["Copper"] * 6, "owned_cards": {"Copper": 2}}}))
+    code, out, _ = run_analyze(capsys, str(bad), "--target", "Copper")
+    assert code == 1 and "not consistent" in out

@@ -1,4 +1,4 @@
-# Session tracking & belief state (Phase 2b)
+# Session tracking & belief state
 
 *Reference for `cardgame dominion session ...`. Back to the [README](../README.md).*
 
@@ -110,6 +110,97 @@ Draw pile (unknown, 6 cards, top first: Gold, rest in unknown order): Copper x2,
 Discard (unknown, 3 cards): Copper x2 + 1 unknown ('?')
 ```
 
+## Deck analysis & draw odds
+
+Three read-only queries over the tracked belief (`card_game_engine.games.dominion.inference`); none of
+them changes the session, and every result is a frozen dataclass with `to_dict()` (exact values as
+`"a/b"` strings next to floats):
+
+| Function | Answers |
+|---|---|
+| `analyze_deck(session) -> DeckAnalysis` | per zone (`draw_pile`, `discard_pile`, `hand`, `in_play`, `owned`, `trash`), per card and per type: `certain` (set only for a deterministic count), `min`/`max`, exact `expected`, `status` (`observed` / `deduced` / `probabilistic` / `unknown`), `P(count = c)` for probabilistic counts, the number of `?` cards and the known top order of the draw pile |
+| `analyze_draw(session, draw_count, target, at="auto") -> DrawAnalysis` | `P(X = k)` for X = number of target cards among the next `draw_count` draws, `P(none)`, `P(at least k)`, `E[X]`, guaranteed min/max, `P(reshuffle)`, `P(fewer cards drawn)`, method, notes |
+| `get_guaranteed_cards(session, draw_count=None, at="auto") -> GuaranteedCards` | min/max of every card and type in the next `draw_count` draws (default: the hand size), the guarantees ("at least 2 Copper") and owned cards that cannot be drawn |
+
+**Targets** are a card name or a type (`Treasure`, `Action`, `Victory`, `Curse`, `Attack`, `Reaction`),
+case-insensitive; a card name wins over a type name (`Curse` is the card). Typos get suggestions.
+The pure versions (`Target`, `parse_target`, `draw_count_distribution`, `guaranteed_range`) live in
+`planning/analysis.py` and work on weighted `(weight, DrawPileKnowledge, DiscardKnowledge)` sources.
+They relabel every card as match / non-match / `?` and run the usual `enumerate_draws` (so reshuffles
+and short draws follow the same rules as everywhere else); a seeded Monte Carlo fallback, labelled
+`monte_carlo`, is used only if even the relabelled outcomes exceed the enumeration limit.
+
+**`at`**: `now` draws from the current piles (pending draws are the first draws); `next_turn` draws after
+this turn's Clean-up, with the same assumptions as `predict` (pending draws unseen, no further plays,
+hand and play to the discard pile); `auto` (default) picks what `predict` picks - the pending
+start-of-turn hand, else the next turn. The `draw_count` draws are **continuous draws, no Clean-up
+between them** (drawing 7 means 5 + 2 more, reshuffling if needed); use the planner's `hands:N` horizon
+for multi-turn projections.
+
+**Unknown cards.** A `?` card never counts as a match, so with `?` cards the values are **bounds**
+(`bounded: true`): the lower value counts no `?` as the target, the upper (`upper` in JSON) counts every
+drawn `?` as the target, and the truth lies in `[lower, upper]` for `P(X >= k)` and `E[X]` (`max`
+also counts `?`). If the draws reach a pile whose **size** is unknown (e.g. a snapshot without
+`deck_count`/`owned_cards`), the result is `determinable: false`: no probabilities are given (null in
+JSON), only the min/max bounds.
+`get_guaranteed_cards` lists only identities known to exist: a card that only a `?` could be is not enumerated.
+
+CLI: `session deck FILE`, `session draws FILE --count N --target T [--at now|next-turn]`,
+`session guaranteed FILE [--count N] [--at ...]` (all with `--json`), and the stateless
+`cardgame dominion analyze STATE|-e NAME [--count N] [--target T] [--at ...] [--json]` (with `--target`:
+the draw distribution; without: guaranteed cards). An unknown target is a usage error (exit 2). As run:
+
+```text
+$ cardgame dominion session start game.session.json
+$ cardgame dominion session hand game.session.json "4 Copper, Estate"
+$ cardgame dominion session buy game.session.json Silver
+$ cardgame dominion session guaranteed game.session.json --count 7
+Cards in the next 7 card(s) - next turn, after this turn's Clean-up (turn 2), method exact, hidden states 1
+Guaranteed: at least 3 Copper, at least 2 Estate, at least 4 Treasure, at least 2 Victory
+  Card / type          min  max
+  Copper                 3    5
+  Estate                 2    3
+  Silver                 0    1
+  Treasure (type)        4    5
+  Victory (type)         2    3
+P(reshuffle while drawing): 1    P(fewer than 7 cards drawn): 0
+$ cardgame dominion session draws game.session.json --count 7 --target Silver
+Silver in the next 7 card(s) - next turn, after this turn's Clean-up (turn 2), method exact, hidden states 1
+Guaranteed range: at least 0, at most 1 Silver
+  k    P(X = k)
+  0    2/3 = 0.667
+  1    1/3 = 0.333
+P(none): 2/3 = 0.667    P(at least 1): 1/3 = 0.333    E[count]: 1/3 = 0.333
+P(reshuffle while drawing): 1    P(fewer than 7 cards drawn): 0
+Note: The draws are continuous: no Clean-up happens between them (for multi-turn projections use the planner's --horizon hands:N).
+$ cardgame dominion session end-turn game.session.json
+$ cardgame dominion session end-turn game.session.json
+$ cardgame dominion session draws game.session.json --count 5 --target Treasure --at now
+Treasure (type) in the next 5 card(s) - drawn from the current piles (turn 3), method exact, hidden states 1
+Guaranteed range: at least 2, at most 5 Treasure
+  k    P(X = k)
+  2    2/33 = 0.061
+  3    4/11 = 0.364
+  4    5/11 = 0.455
+  5    4/33 = 0.121
+P(none): 0    P(at least 1): 1    E[count]: 40/11 = 3.636
+P(reshuffle while drawing): 1    P(fewer than 5 cards drawn): 0
+$ cardgame dominion analyze -e partial_knowledge --count 3 --target Treasure --at now
+Treasure (type) in the next 3 card(s) - drawn from the current piles (turn 10), method exact, hidden states 1
+Guaranteed range: at least 1, at most 3 Treasure (the maximum counts '?' cards as matches)
+  k    P(X = k)  [lower, upper]
+  1    [0, 3/10 = 0.300]
+  2    [1/5 = 0.200, 9/10 = 0.900]
+  3    [1/10 = 0.100, 3/5 = 0.600]
+P(none): 0    P(at least 1): 1    E[count]: [9/5 = 1.800, 13/5 = 2.600]
+$ cardgame dominion analyze -e unknown_deck_minimal --target Copper
+Copper in the next 5 card(s) - next turn, after this turn's Clean-up (turn ?), method exact, hidden states 1
+Not determinable: the draws reach a pile of unknown size. Bounds only: at least 0, at most 5 Copper.
+```
+
+(Output trimmed: some `Note:` lines omitted. The 7-card queries are 5 cards from the draw pile, then 2
+from the reshuffled 4 Copper, Estate, Silver; turn 3's 5 cards come from the reshuffled 11.)
+
 ## Session limitations
 
 - Single-player tracking: only your own deck is tracked. Opponents' effects on you (Militia, Witch,
@@ -118,6 +209,10 @@ Discard (unknown, 3 cards): Copper x2 + 1 unknown ('?')
   counts you care about with `supply PILE=N`.
 - If the number of hidden states would exceed `max_worlds` (default 5000), they are collapsed to what
   is certain and the rest becomes `?` (flagged; predictions become lower bounds).
+- A `?` card has no prior, so an observation it may have matched (a drawn or entered card, a trash,
+  discard or purchase) has no likelihood: of the pile drawn from only what is certainly left stays
+  known (`known - observed` of each card), the rest becomes `?`, and several remaining hidden states are
+  merged to what is certain (flagged). This loses information but keeps every range honest.
 - The planner works on one state: with a mixture of hidden states, cards whose location is uncertain
   are passed as `?` (a conservative approximation, reported in the plan's notes); it refuses to plan
   while the current hand is undetermined.

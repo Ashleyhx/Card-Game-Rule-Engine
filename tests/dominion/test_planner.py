@@ -7,14 +7,15 @@ import pytest
 
 from fractions import Fraction
 
+from card_game_engine.cli import main as cardgame_main
 from card_game_engine.games.dominion.planning import (
-    PlanConfig, card_totals, compare_actions, evaluate_action_sequences, from_game_state, get_objective,
-    plan_next_action, projected_hand_count, simulate_projected_cleanup,
+    PlanConfig, card_totals, compare_actions, draw_count_distribution, evaluate_action_sequences, from_game_state,
+    get_objective, parse_target, plan_next_action, projected_hand_count, simulate_projected_cleanup,
 )
 from card_game_engine.games.dominion.policy import HeuristicPolicy
 from card_game_engine.games.dominion.rules import (
-    Buy, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure, SnapshotError, action_from_dict, action_to_dict,
-    state_from_dict,
+    Buy, DiscardKnowledge, DrawPileKnowledge, EndTurn, PlayAction, PlayAllTreasures, PlayTreasure, SnapshotError,
+    action_from_dict, action_to_dict, load_registry, state_from_dict,
 )
 from tests.dominion.conftest import FIRST_GAME
 
@@ -370,6 +371,19 @@ def test_money_objective_says_purchase_is_not_judged(engine):
     assert MONEY_BUY_NOTE not in no_buy.limitations
 
 
+def test_target_objective_notes_purchase_and_first_hand_only_ties(engine):
+    from card_game_engine.games.dominion.planning.planner import TARGET_BUY_NOTE, TARGET_TIE_HINT
+
+    state = snap(phase="buy", coins=3, buys=1, hand=["Estate"], draw_pile={"composition": {"Copper": 5, "Estate": 3}},
+                 discard_pile={"composition": {}})
+    result = plan_next_action(state, PlanConfig(objective="target:Silver>=1", horizon="hands:2"), engine)
+    assert TARGET_BUY_NOTE in result.limitations and result.tie
+    tie = next(s for s in result.explanation if s.startswith("TIE"))
+    assert TARGET_TIE_HINT in tie and "longer horizon)" not in tie
+    silver = by_label(all_candidates(result))["Buy Silver"]
+    assert silver.projected_hands[0]["p_target"] == 0 < silver.projected_hands[1]["p_target"]  # only hand 2 differs
+
+
 # ---------------------------------------------------------------- horizon hands:N, future_money, ties
 
 def turn_one(**overrides):
@@ -579,3 +593,119 @@ def test_snapshot_horizon_rejects_what_plan_config_rejects(horizon):
         state_from_dict(snap)
     with pytest.raises(ValueError):
         PlanConfig(horizon=horizon)
+
+
+# ---------------------------------------------------------------- objective target:<T>>=<K>
+
+def test_target_objective_exact_probability_differs_between_action_plays(engine):
+    # village_smithy: hand Village, Smithy, Copper; draw pile {Copper 2, Silver 1, Estate 3} (3 Treasures, 3 Estates).
+    # Treasure>=3 in hand + play = the Copper in hand + >= 2 Treasures among the cards drawn.
+    #   Village, then Smithy: 4 of the 6 cards; at most 3 are Estates, so 0 Treasures is impossible;
+    #     P(1 Treasure) = C(3,1)C(3,3)/C(6,4) = 3/15  ->  P = 12/15 = 4/5.
+    #   Smithy first (Village stranded): 3 of 6:  P(>=2) = [C(3,2)C(3,1) + C(3,3)] / C(6,3) = 10/20 = 1/2.
+    #   No Action: the Copper alone -> 0.
+    state = village_smithy()
+    result = plan_next_action(state, PlanConfig(objective="target:Treasure>=3"), engine)
+    assert result.objective == "target:Treasure>=3" and result.value_name == "P(Treasure>=3)"
+    assert action_from_dict(result.recommended.action) in engine.legal_actions(state)
+    cands = by_label(all_candidates(result))
+    assert result.recommended.action_key == "Play Village" and not result.tie
+    assert cands["Play Village"].expected_value == pytest.approx(4 / 5, abs=1e-12)
+    assert cands["Play Smithy"].expected_value == pytest.approx(1 / 2, abs=1e-12)
+    assert cands["End Action phase (go to Buy phase)"].expected_value == 0
+    assert cands["Play Village"].value_provenance == "expected" and result.method == "exact"
+    # Outcome groups carry the target count, so the exact distribution adds up to the same probability.
+    full = plan_next_action(state, PlanConfig(objective="target:Treasure>=3", top_outcomes=50), engine)
+    village = by_label(all_candidates(full))["Play Village"]
+    assert village.other_probability == pytest.approx(0.0)
+    assert sum(o.probability for o in village.outcome_distribution
+               if o.metrics["target_count"] >= 3) == pytest.approx(4 / 5, abs=1e-12)
+    # target:<card> means K = 1: P(Silver among 4 of 6) = 4/6 vs 3/6.
+    silver = compare_actions(state, [PlayAction("Smithy"), PlayAction("Village")],
+                             PlanConfig(objective="target:silver"), engine)
+    assert silver.objective == "target:Silver>=1"
+    assert [(c.action_key, c.expected_value) for c in silver.candidates] == [
+        ("Play Village", pytest.approx(2 / 3)), ("Play Smithy", pytest.approx(1 / 2))]
+    json.dumps(result.to_dict())
+
+
+def test_target_objective_unknown_cards_are_lower_bounds(engine):
+    # Draw pile = 2 Copper + 1 unknown card; Smithy draws all three: 3 known Treasures + "?" (never a match).
+    state = snap(hand=["Smithy", "Copper"], draw_pile={"composition": {"Copper": 2}, "unknown_count": 1},
+                 discard_pile={"composition": {}})
+    result = plan_next_action(state, PlanConfig(objective="target:Treasure>=4"), engine)
+    smithy = by_label(all_candidates(result))["Play Smithy"]
+    assert smithy.expected_value == 0 and smithy.value_provenance == "lower_bound"
+    label = smithy.outcome_distribution[0].label
+    assert label.startswith("coins=$3+") and "target cards 3+" in label
+    # The lower-bound wording fits the objective: "?" cards are non-matching here, $0 for money objectives.
+    bound = [s for s in smithy.explanation if s.startswith("This value is a lower bound")]
+    assert bound and all("counted as non-matching" in s and "$0" not in s for s in bound)
+    money = by_label(all_candidates(plan_next_action(state, PlanConfig(objective="money"), engine)))["Play Smithy"]
+    assert any(s.endswith("which are counted as $0.") for s in money.explanation)
+
+
+def test_target_objective_hands_2_per_hand_probability_matches_draw_analysis(engine):
+    # turn_one_treasures_played: 4 Coppers in play, Estate in hand, draw pile {Copper 3, Estate 2}.
+    # Hand 1 is that whole pile: 3 Treasures -> P(>=4 Treasures) = 0 for every candidate -> the utility (first
+    # projected hand) is 0 for both: a tie, reported as before. Hand 2 = 5 cards from the reshuffled discard:
+    #   Buy Silver: {Copper 7, Silver 1, Estate 3}: [C(8,4)C(3,1) + C(8,5)] / C(11,5) = (210 + 56)/462 = 19/33.
+    #   Nothing:    {Copper 7, Estate 3}:           [C(7,4)C(3,1) + C(7,5)] / C(10,5) = (105 + 21)/252 = 1/2.
+    cfg = PlanConfig(objective="target:Treasure>=4", horizon="hands:2")
+    res = compare_actions(turn_one_treasures_played(), [Buy("Silver"), EndTurn()], cfg, engine)
+    assert res.value_name == "P(next hand Treasure>=4)"
+    assert res.tie and set(res.tied_actions) == {"Buy Silver", "End turn (Clean-up)"}
+    assert all(c.expected_value == 0 and c.value_provenance == "expected" for c in res.candidates)
+    silver, nothing = by_label(res.candidates)["Buy Silver"], by_label(res.candidates)["End turn (Clean-up)"]
+    treasure = parse_target("Treasure", load_registry())
+    for c, discard, expected in ((silver, {"Copper": 7, "Silver": 1, "Estate": 3}, Fraction(19, 33)),
+                                 (nothing, {"Copper": 7, "Estate": 3}, Fraction(1, 2))):
+        h1, h2 = c.projected_hands
+        assert h1["target"] == "Treasure>=4" and h1["p_target_exact"] == "0" and h1["provenance"] == "exact"
+        assert Fraction(h2["p_target_exact"]) == expected and h2["p_target"] == pytest.approx(float(expected))
+        # Same number from the session analysis' draw engine on the piles after hand 1's Clean-up.
+        counts = draw_count_distribution([(Fraction(1), DrawPileKnowledge(), DiscardKnowledge(discard))], 5, treasure)
+        assert counts.method == "exact" and counts.p_reshuffle == 1 and counts.p_at_least(4) == expected
+    assert any("P(Treasure>=4)=0.58" in s for s in silver.explanation)
+    # Horizon turn: the 4 Coppers in play already make it certain whatever is done -> also a tie, at 1.
+    turn = compare_actions(turn_one_treasures_played(), [Buy("Silver"), EndTurn()],
+                           PlanConfig(objective="target:Treasure>=4"), engine)
+    assert turn.tie and all(c.expected_value == 1 and c.value_provenance == "exact" for c in turn.candidates)
+    assert all(not c.projected_hands for c in turn.candidates)
+
+
+@pytest.mark.parametrize("bad,match", [
+    ("target:", "Unknown target ''"), ("target:Tresure", "Did you mean: Treasure"),
+    ("target:Treasure>=0", "K >= 1"), ("target:Treasure>=x", "K >= 1"), ("target:Treasure>=", "K >= 1"),
+    ("target:>=2", "Unknown target"),
+])
+def test_target_objective_bad_strings(bad, match):
+    with pytest.raises(ValueError, match=match):
+        PlanConfig(objective=bad)
+    with pytest.raises(ValueError, match="Bad target objective"):
+        get_objective(bad)
+
+
+def test_target_objective_parsing():
+    assert get_objective("target:Gold").name == "target:Gold>=1"
+    assert get_objective("TARGET:action >= 2").name == "target:Action>=2"
+    assert get_objective("target:Curse").target.kind == "card"   # card names win over type names
+    assert PlanConfig.from_dict(PlanConfig(objective="target:Treasure>=3").to_dict()).objective == "target:Treasure>=3"
+
+
+def test_cli_plan_target_objective(capsys):
+    # small_deck_village_smithy: 2 Coppers in hand; draw pile {Copper 2, Silver 1, Estate 2}.
+    # Village + Smithy draw 4 of 5 -> >= 2 Treasures for certain -> 1; Smithy first: 3 of 5 ->
+    # [C(3,2)C(2,1) + C(3,3)] / C(5,3) = 7/10.
+    code = cardgame_main(["dominion", "plan", "-e", "small_deck_village_smithy", "--objective", "target:Treasure>=4"])
+    out = capsys.readouterr().out
+    assert code == 0 and ">> RECOMMENDED: Play Village    P(Treasure>=4) = 1.00" in out
+    assert "Play Smithy" in out and "P(Treasure>=4) = 0.70" in out
+    code = cardgame_main(["dominion", "plan", "-e", "small_deck_village_smithy", "--objective", "target:Treasure>=4",
+                          "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0 and data["objective"] == "target:Treasure>=4" and data["value_name"] == "P(Treasure>=4)"
+    assert data["recommended"]["action_key"] == "Play Village" and data["recommended"]["expected_value"] == 1.0
+    assert data["alternatives"][0]["expected_value"] == pytest.approx(7 / 10)
+    code = cardgame_main(["dominion", "plan", "-e", "opening_5_2", "--objective", "target:Tresure>=2"])
+    assert code == 2 and "Did you mean: Treasure" in capsys.readouterr().err

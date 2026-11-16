@@ -95,7 +95,7 @@ def build_context(state: GameState, engine: DominionRuleEngine) -> GameContext:
     unknowns: list[str] = []
     deck = deck_stats(state.owned_cards, engine) if state.owned_cards is not None else None
     if deck is None:
-        unknowns.append("Deck composition unknown: deck-fit (terminal collision, duplicates) and your VP total are not evaluated.")
+        unknowns.append("Deck composition unknown: deck-fit (terminal collision, duplicates), next-shuffle odds and your VP total are not evaluated.")
     my_vp = engine.victory_points(state.owned_cards) if state.owned_cards is not None else None
 
     opp_vps: list[int] | None = []

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from ..planning import PlanConfig, PlanResult
 from ..planning import plan_next_action as _plan_on_state
+from ..planning.analysis import MC_SAMPLES
 from ..rules.state import GameState, Phase, state_from_dict
 from ..rules.validation import validate_state
 from ..rules.zones import (
@@ -48,7 +49,6 @@ from .replay import OBSERVATION_TYPES, apply_event, shared_engine
 DEFAULT_CONFIG: dict[str, Any] = {
     "num_players": 2, "kingdom": None, "player_name": "You", "max_worlds": 5000, "snapshot": None,
 }
-MC_SAMPLES = 20_000
 
 
 class HandNotDetermined(ValueError):
@@ -235,23 +235,42 @@ class HandPrediction:
         }
 
 
+DRAW_POINTS = ("auto", "now", "next_turn")
+
+
+def draw_source(session: Session, at: str = "auto") -> tuple[str, int | None, tuple[World, ...], list[str]]:
+    """The worlds future draws come from: ``(at, turn, worlds, notes)`` with ``at`` resolved.
+
+    ``now``: the current piles (pending draws are the first draws). ``next_turn``: after this turn's
+    Clean-up (pending draws treated as unobserved; hand and play to the discard pile). ``auto``: ``now``
+    while the start-of-turn hand is still pending, else ``next_turn`` (the choice ``predict_next_hand`` makes).
+    """
+    if at not in DRAW_POINTS:
+        raise ValueError(f"at must be one of {', '.join(DRAW_POINTS)}, not {at!r}")
+    b = infer_belief_state(session)
+    t = b.game.turn
+    if at == "auto":
+        start = t.pending_draws and t.phase == Phase.ACTION and not t.in_play and all(not w.hand for w in b.worlds)
+        at = "now" if start else "next_turn"
+    if at == "now":
+        return at, b.turn, b.worlds, []
+    worlds, notes = b.worlds, []
+    if t.pending_draws:
+        worlds, _ = draw_unobserved(worlds, t.pending_draws, session.config["max_worlds"])
+        notes.append(f"The {t.pending_draws} pending draw(s) are treated as unobserved.")
+    in_play = list(t.in_play)
+    worlds = map_worlds(worlds, lambda w: cleanup_world(w, in_play))
+    notes.append("Assumes no further plays, draws or gains this turn; hand and play go to the discard pile "
+                 "at Clean-up.")
+    return at, None if b.turn is None else b.turn + 1, worlds, notes
+
+
 def predict_next_hand(session: Session, top: int = 10) -> HandPrediction:
     """The pending start-of-turn hand, or else the next turn's hand assuming nothing more happens this turn."""
     b = infer_belief_state(session)
-    eng, t = shared_engine(), b.game.turn
-    worlds, notes = b.worlds, []
-    if t.pending_draws and t.phase == Phase.ACTION and not t.in_play and all(not w.hand for w in worlds):
-        which, turn, n = "start_of_turn", b.turn, t.pending_draws
-    else:
-        if t.pending_draws:
-            worlds, _ = draw_unobserved(worlds, t.pending_draws, session.config["max_worlds"])
-            notes.append(f"The {t.pending_draws} pending draw(s) are treated as unobserved.")
-        in_play = list(t.in_play)
-
-        worlds = map_worlds(worlds, lambda w: cleanup_world(w, in_play))
-        which, turn, n = "next_turn", None if b.turn is None else b.turn + 1, eng.ruleset.hand_size
-        notes.append("Assumes no further plays, draws or gains this turn; hand and play go to the discard pile "
-                     "at Clean-up.")
+    eng = shared_engine()
+    at, turn, worlds, notes = draw_source(session)
+    which, n = ("start_of_turn", b.pending_draws) if at == "now" else ("next_turn", eng.ruleset.hand_size)
     if outcome_count(worlds, n) <= ENUMERATION_LIMIT:
         exact, p_reshuffle = predictive(worlds, n)
         dist: dict[tuple[str, ...], Fraction | float] = dict(exact)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 from ..planning import CandidateEvaluation, ComparisonResult, PlanConfig, PlanResult, overall_method
+from ..planning.planner import TARGET_TIE_HINT, TIE_HINT
 from ..policy import RankedAction, Recommendation
 from ..rules import DominionRuleEngine, GameState, Issue
 
@@ -130,16 +131,17 @@ def _projected_hands(c: CandidateEvaluation, indent: str) -> list[str]:
     lines = [f"{indent}Projected hands (no decisions in future turns):"] if c.projected_hands else []
     for h in c.projected_hands:
         op = ">= " if h["provenance"] == "lower_bound" else "= "
+        target = f", P({h['target']}) {op}{h['p_target']:.2f}" if "p_target" in h else ""
         lines.append(f"{indent}  hand {h['hand']}: E[$] {op}{h['expected_coins']:.2f}, "
-                     f"P($>=5) {op}{h['p_at_least_5']:.2f}  ({h['provenance']})")
+                     f"P($>=5) {op}{h['p_at_least_5']:.2f}{target}  ({h['provenance']})")
     return lines
 
 
 def _tie_lines(tied: list[str], objective: str, value_name: str, best: CandidateEvaluation, horizon: str) -> list[str]:
+    hint = TARGET_TIE_HINT if objective.startswith("target:") and best.projected_hands else TIE_HINT
     return [f">> TIE under objective {objective} (horizon {horizon}): {', '.join(tied)}    "
             f"{value_name} {plan_value(best)}",
-            "   No difference under this objective/horizon - the decision is beyond it (try another objective or a "
-            "longer horizon).",
+            f"   No difference under this objective/horizon - the decision is beyond it ({hint}).",
             f"   Listed first by tie-break only (NOT better): {best.action['label']}    {_tags(best)}"]
 
 

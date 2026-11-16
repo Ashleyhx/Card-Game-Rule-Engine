@@ -3,6 +3,17 @@
 Depends on ``rules`` and ``planning``; neither imports this package.
 """
 
+from .analysis import (
+    CountBound,
+    CountSummary,
+    DeckAnalysis,
+    DrawAnalysis,
+    GuaranteedCards,
+    ZoneAnalysis,
+    analyze_deck,
+    analyze_draw,
+    get_guaranteed_cards,
+)
 from .belief import BeliefState, Contradiction, World, collapse, predictive
 from .events import (
     EVENT_TYPES,
@@ -25,6 +36,7 @@ from .session import (
     HandNotDetermined,
     HandPrediction,
     Session,
+    draw_source,
     correct_event,
     infer_belief_state,
     initialize_session,
@@ -38,6 +50,8 @@ from .session import (
 )
 
 __all__ = [
+    "CountBound", "CountSummary", "DeckAnalysis", "DrawAnalysis", "GuaranteedCards", "ZoneAnalysis",
+    "analyze_deck", "analyze_draw", "get_guaranteed_cards", "draw_source",
     "BeliefState", "Contradiction", "World", "collapse", "predictive",
     "EVENT_TYPES", "EndTurnObservation", "Event", "IllegalEvent", "InconsistentObservation", "ObserveHand",
     "RecordDiscard", "RecordDraw", "RecordGain", "RecordPlay", "RecordPurchase", "RecordSupply", "RecordTrash",

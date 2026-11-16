@@ -32,7 +32,7 @@ KINGDOM_RATING: dict[str, float] = {
     "Merchant": 4.5,
     "Vassal": 4.5,
     "Harbinger": 4.0,
-    "Moat": 4.0,
+    "Moat": 3.0,  # +2 Cards terminal: notably weaker than Smithy; its defence is scored separately
     "Cellar": 3.5,
     "Workshop": 3.5,
     "Bureaucrat": 3.5,
@@ -41,15 +41,50 @@ KINGDOM_RATING: dict[str, float] = {
 
 # Buy value of basic cards by game stage (same scale as kingdom ratings).
 # Stages: early -> mid -> dance (Duchy dancing) -> late -> endgame.
+# With a known deck, the money a card adds is scored by the next-shuffle odds term below, so Silver
+# and Gold keep only the rest here (previous all-in value minus TYPICAL_MONEY_VALUE: no double count).
 BASIC_BUY_VALUE: dict[str, dict[str, float]] = {
     "Province": {"early": 6.0, "mid": 10.0, "dance": 11.0, "late": 12.0, "endgame": 14.0},
-    "Gold":     {"early": 9.0, "mid": 8.5,  "dance": 7.0,  "late": 4.5,  "endgame": 1.0},
+    "Gold":     {"early": 5.0, "mid": 4.5,  "dance": 6.0,  "late": 4.0,  "endgame": 1.0},
     "Duchy":    {"early": 0.5, "mid": 2.0,  "dance": 5.5,  "late": 6.5,  "endgame": 8.0},
-    "Silver":   {"early": 5.0, "mid": 4.0,  "dance": 3.0,  "late": 2.0,  "endgame": 0.5},
+    "Silver":   {"early": 3.5, "mid": 3.5,  "dance": 2.5,  "late": 1.8,  "endgame": 0.5},
     "Estate":   {"early": -3.0, "mid": -2.0, "dance": -1.0, "late": 0.5, "endgame": 3.0},
     "Copper":   {"early": -1.5, "mid": -1.5, "dance": -1.0, "late": -0.5, "endgame": -0.5},
     "Curse":    {"early": -12.0, "mid": -12.0, "dance": -12.0, "late": -12.0, "endgame": -12.0},
 }
+# Where no odds are computed (deck unknown; the planner's static `purchase` objective) a typical
+# money value is added instead, so Silver/Gold keep their previous all-in values there.
+TYPICAL_MONEY_VALUE: dict[str, dict[str, float]] = {
+    "Gold":   {"early": 4.0, "mid": 4.0, "dance": 1.0, "late": 0.5, "endgame": 0.0},
+    "Silver": {"early": 1.5, "mid": 0.5, "dance": 0.5, "late": 0.2, "endgame": 0.0},
+}
+
+
+def typical_basic_value(card: str, stage: str) -> float:
+    """Value of a basic card without deck-specific odds: BASIC_BUY_VALUE + TYPICAL_MONEY_VALUE."""
+    return BASIC_BUY_VALUE[card][stage] + TYPICAL_MONEY_VALUE.get(card, {}).get(stage, 0.0)
+
+
+# Next-shuffle odds term (policy/odds.py): NEXT_SHUFFLE_WEIGHT x sum over the stage's price points of
+# weight x (P(5-card hand reaches $N | buy the card) - P(... | buy nothing)). Price points follow the
+# Big Money buy rules (DominionStrategy "Money strategies": Province $8, Gold $6-7, Silver $3-5):
+# early you want $5 hands ($5 Actions) and some $6 (Gold), mid $6/$8, later mostly $8.
+NEXT_SHUFFLE_WEIGHT = 10.0
+NEXT_SHUFFLE_PRICE_WEIGHTS: dict[str, dict[int, float]] = {
+    "early": {5: 1.0, 6: 0.5},
+    "mid": {6: 1.0, 8: 1.0},
+    "dance": {6: 0.25, 8: 1.0},
+    "late": {8: 0.75},
+    "endgame": {8: 0.25},  # few shuffles left: deck quality barely matters
+}
+# Kingdom ratings already include a typical economic contribution, so Kingdom cards get only this
+# share of the odds term (enough to separate deck fit: a second terminal, draw without money...).
+KINGDOM_NEXT_SHUFFLE_SHARE = 0.5
+
+# Moat's defence, per attack in the kingdom (the strongest one counts), x (1 + 0.5 per extra opponent).
+# Junking attacks matter most (DominionStrategy "Moat"); Militia alone is a small reason to buy Moat.
+MOAT_DEFENCE = {"Witch": 2.0, "Bandit": 0.8, "Bureaucrat": 0.6, "Militia": 0.4}
+MOAT_DEFENCE_PER_EXTRA_OPPONENT = 0.5
 
 # Kingdom card value multiplier by stage (actions lose value as the game ends).
 KINGDOM_STAGE_MULTIPLIER = {"early": 1.0, "mid": 0.85, "dance": 0.55, "late": 0.35, "endgame": 0.1}

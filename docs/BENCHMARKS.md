@@ -37,7 +37,7 @@ cannot be modelled at all there.
 | opening_5_2 | Play all Treasures | Play all Treasures | 5.00 | 5.00 | +0.00 | equal | 0.010 s | 34 |
 | ordered_deck_known | Play Village | Play Village | 8.00 | 8.00 | +0.00 | equal | 0.038 s | 129 |
 | partial_knowledge | Play Smithy | Play Smithy | >=7.80 | >=7.80 | +0.00 | equal | 0.077 s | 258 |
-| reshuffle_next_hand | Buy Witch | Buy Gold | 6.00 | 6.00 | +0.00 | equal | 0.010 s | 34 |
+| reshuffle_next_hand | Buy Gold | Buy Gold | 6.00 | 6.00 | +0.00 | equal | 0.010 s | 34 |
 | small_deck_village_smithy | Play Village | Play Village | 5.20 | 5.20 | +0.00 | equal | 0.099 s | 341 |
 | stranded_draw_vs_money | Play Smithy | Play Militia | 3.00 | 5.00 | +2.00 | better | 0.021 s | 82 |
 | three_pile_ending | Play all Treasures | Play all Treasures | 3.00 | 3.00 | +0.00 | equal | 0.005 s | 18 |
@@ -59,11 +59,13 @@ deterministic for the fixed seed.
   numbers are not a verdict on which policy plays Dominion better.
 - **Small, hand-made sample.** 13 snapshots. Five of them (`small_deck_village_smithy`,
   `stranded_draw_vs_money`, `ordered_deck_known`, `reshuffle_next_hand`, `partial_knowledge`) were
-  written for Phase 2, and `stranded_draw_vs_money` was built specifically to show a case where
+  written for the planner, and `stranded_draw_vs_money` was built specifically to show a case where
   greedy action ranking strands an Action. The one `better` row is that case.
-- `reshuffle_next_hand`: the actions differ (Buy Witch vs Buy Gold) but coins this turn are the
-  same, so it counts as `equal`. The `money` objective does not judge purchases. Under the
-  `next_hand_money` objective the planner prefers Buy Gold (E[next-hand $] = 5.00 vs 4.20 for no buy).
+- `reshuffle_next_hand`: both pick Buy Gold. The heuristic picked Buy Witch before its next-shuffle
+  odds term (HEURISTIC.md); in this 7-card deck Gold lifts P($>=8) from 0% to 20%, and it now edges
+  out Witch (low confidence). Coins this turn are the same either way; the `money` objective does not
+  judge purchases. Under `next_hand_money` the planner prefers Buy Gold (E[next-hand $] = 5.00 vs 4.20
+  for no buy).
 - `throne_room_moneylender`: only `deck_count` is known, so the drawn cards are unknown and the
   heuristic's line (Throne Room on Smithy draws 6 cards) is valued at a lower bound of $2. The real
   value may be higher than the planner's $4, so the comparison is `inconclusive`.

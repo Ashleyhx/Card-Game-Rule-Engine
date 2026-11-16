@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from importlib import resources
 from pathlib import Path
 
+from ..inference import analyze_draw, get_guaranteed_cards, initialize_session
 from ..planning import PlanConfig, compare_actions, get_objective, plan_next_action
 from ..policy import HeuristicPolicy
 from ..rules import DominionRuleEngine, SnapshotError, action_to_dict, has_errors, state_from_dict, validate_state
@@ -206,6 +208,29 @@ def cmd_sources(args, engine) -> int:
     return EXIT_OK
 
 
+def cmd_analyze(args, engine) -> int:
+    """Stateless deck/draw analysis of a snapshot (snapshot -> session -> the session analysis functions)."""
+    from .session_cli import render_draw_analysis, render_guaranteed
+
+    data = _load_snapshot(args)
+    state = state_from_dict(copy.deepcopy(data), engine.registry, engine.ruleset)
+    issues = validate_state(state, engine)
+    if has_errors(issues):
+        _emit({"valid": False, "issues": [i.to_dict() for i in issues]}, args.json,
+              "Snapshot is not consistent with the rules:\n" + render_issues(issues))
+        return EXIT_INVALID
+    session = initialize_session({"snapshot": data})
+    if args.target:
+        count = engine.ruleset.hand_size if args.count is None else args.count
+        result = analyze_draw(session, count, args.target, args.at)
+        lines = render_draw_analysis(result)
+    else:
+        result = get_guaranteed_cards(session, args.count, args.at)
+        lines = render_guaranteed(result)
+    _emit(result.to_dict(), args.json, "\n".join(lines))
+    return EXIT_OK
+
+
 def cmd_interactive(args, engine) -> int:
     return interactive_main(engine, load=args.load, save=args.save)
 
@@ -293,6 +318,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                       help='Only these actions, by label (case-insensitive), e.g. --actions "Play Village" "Play Smithy"')
     cmp_.set_defaults(func=_run(cmd_compare))
 
+    an = sub.add_parser("analyze", help="Exact draw odds for a snapshot: P(k of a card/type) or guaranteed cards")
+    add_state_args(an)
+    an.add_argument("--count", type=int, help="Number of cards drawn (default: the hand size)")
+    an.add_argument("--target", help="A card or type (Treasure, Action, ...); without it: guaranteed cards")
+    add_at_flag(an)
+    an.set_defaults(func=_run(cmd_analyze))
+
     from .session_cli import register_session_cli  # imports this module, so register it last
 
     register_session_cli(sub)
@@ -301,7 +333,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 def add_planner_flags(sp) -> None:
     """Planner options shared by ``plan``, ``compare`` and ``session plan``."""
     sp.add_argument("--objective", default="money",
-                    help="money (default) | purchase | threshold:N | next_hand_money | future_money")
+                    help="money (default) | purchase | threshold:N | next_hand_money | future_money | "
+                         "target:T>=K (P(at least K cards of card/type T in hand+play, or in the next hand with "
+                         "--horizon next_hand/hands:N); quote it in the shell, e.g. 'target:Treasure>=3')")
     sp.add_argument("--horizon",
                     help="turn | next_hand | hands:N (1-4): plan to the end of the turn, or also project the "
                          "next N start-of-turn hands with no decisions in future turns (next_hand = hands:1; "
@@ -312,3 +346,10 @@ def add_planner_flags(sp) -> None:
                     help="Monte Carlo samples per chance node that is too large to enumerate (default 32)")
     sp.add_argument("--seed", type=int, default=0, help="Random seed for sampling (default 0)")
     sp.add_argument("--top", type=int, default=5, help="How many outcomes / alternatives to show (default 5)")
+
+
+def add_at_flag(sp) -> None:
+    """``--at`` shared by ``analyze`` and ``session draws|guaranteed``."""
+    sp.add_argument("--at", choices=("auto", "now", "next-turn"), default="auto",
+                    help="now: draw from the current piles (pending draws first); next-turn: after this turn's "
+                         "Clean-up; auto (default): the pending start-of-turn hand, else next turn")

@@ -27,13 +27,15 @@ from typing import Any, Protocol
 from ..policy import weights as W
 from ..policy.context import build_context
 from ..rules.actions import PlayAllTreasures
+from ..rules.cards import load_registry
 from ..rules.engine import DominionRuleEngine
 from ..rules.state import GameState, Phase
 from ..rules.zones import UNKNOWN_CARD
+from .analysis import Target, parse_target
 from .draws import BOUNDARY_UNKNOWN_DRAW_PILE
 from .transitions import PlanState
 
-OBJECTIVE_NAMES = ("money", "threshold:<T>", "purchase", "next_hand_money", "future_money")
+OBJECTIVE_NAMES = ("money", "threshold:<T>", "purchase", "next_hand_money", "future_money", "target:<T>>=<K>")
 
 #: Weight of the secondary tie-break added to the utility during search. The tie-break
 #: is in [0, 1), so it moves a value by less than 1e-6 and never outweighs a real
@@ -63,6 +65,8 @@ METRIC_PROVENANCE: dict[str, str] = {
     "hand_coins_is_lower_bound": "exact",
     "future_coins": "exact",
     "future_coins_is_lower_bound": "exact",
+    "target_count": "exact",
+    "hand_target_counts": "exact",
 }
 
 
@@ -84,12 +88,15 @@ def _playable_treasure_coins(ps: PlanState, engine: DominionRuleEngine) -> int:
     return engine.apply(game, PlayAllTreasures()).state.turn.coins - t.coins
 
 
-def leaf_metrics(turn: PlanState, final: PlanState, engine: DominionRuleEngine, root: PlanState) -> dict[str, Any]:
+def leaf_metrics(turn: PlanState, final: PlanState, engine: DominionRuleEngine, root: PlanState,
+                 target: Target | None = None) -> dict[str, Any]:
     """Plain, exactly computed facts about one leaf (see ``METRIC_PROVENANCE``).
 
     ``cards_drawn_this_turn`` counts cards drawn since the snapshot ``root``.
     ``coins_is_lower_bound``: this turn's coins may be higher than computed, because unknown
     cards ("?") are in hand or drawing stopped mid-turn at an unknown draw pile (both count $0).
+    With a ``target``: ``target_count`` (known target cards in hand + in play this turn) and
+    ``hand_target_counts`` (per projected hand); "?" never matches, so the same lower-bound flags apply.
     """
     t = turn.game.turn
     spent = sum(engine.card(c).cost for c in t.bought)
@@ -120,6 +127,8 @@ def leaf_metrics(turn: PlanState, final: PlanState, engine: DominionRuleEngine, 
         "boundary": final.boundary,
         "stopped": stopped,
     }
+    if target is not None:
+        m["target_count"] = sum(1 for c in (*t.hand, *t.in_play) if target.matches(c))
     hands = final.projected_hands
     if hands:
         # Per projected hand; only the last one can still be owed cards (unknown draw pile).
@@ -136,6 +145,8 @@ def leaf_metrics(turn: PlanState, final: PlanState, engine: DominionRuleEngine, 
         m["hand_coins_is_lower_bound"] = lower
         m["future_coins"] = sum(coins)
         m["future_coins_is_lower_bound"] = any(lower)
+        if target is not None:
+            m["hand_target_counts"] = [sum(1 for c in h if target.matches(c)) for h in hands]
     return m
 
 
@@ -145,9 +156,14 @@ def leaf_label(m: dict[str, Any]) -> str:
     parts.append("bought " + ", ".join(m["bought"]) if m["bought"] else "bought nothing")
     if m["unknown_cards_in_hand"]:
         parts.append(f"{m['unknown_cards_in_hand']} unknown card(s) in hand")
+    if "target_count" in m:
+        parts.append(f"target cards {m['target_count']}{'+' if m['coins_is_lower_bound'] else ''}")
     if "hand_coins" in m:
         hands = [f"${c}{'+' if lb else ''}" for c, lb in zip(m["hand_coins"], m["hand_coins_is_lower_bound"])]
         parts.append(("next hand " if len(hands) == 1 else "next hands ") + ", ".join(hands))
+        if "hand_target_counts" in m:
+            parts.append("target cards per hand " + ", ".join(
+                f"{n}{'+' if lb else ''}" for n, lb in zip(m["hand_target_counts"], m["hand_coins_is_lower_bound"])))
     if m["boundary"]:
         parts.append(f"boundary {m['boundary']}")
     elif m["stopped"] == "mid_turn":
@@ -223,7 +239,7 @@ class PurchaseObjective:
 
     def card_value(self, card: str) -> float:
         if card in W.BASIC_BUY_VALUE:
-            return W.BASIC_BUY_VALUE[card][self.stage]
+            return W.typical_basic_value(card, self.stage)
         return W.KINGDOM_RATING.get(card, 4.0) * W.KINGDOM_STAGE_MULTIPLIER[self.stage]
 
     def utility(self, metrics: dict[str, Any]) -> float:
@@ -258,16 +274,48 @@ class FutureMoneyObjective:
         return metrics.get("future_coins", 0)
 
 
+@dataclass(frozen=True)
+class TargetObjective:
+    """1 if at least ``k`` ``target`` cards are in hand + in play at the end of this turn (``hands == 0``,
+    horizon ``turn``) or in the first projected hand (``hands`` > 0; the planner sets it from the horizon)."""
+
+    target: Target
+    k: int = 1
+    hands: int = 0
+    provenance: str = "exact"
+
+    @property
+    def name(self) -> str:
+        return f"target:{self.target.name}>={self.k}"
+
+    @property
+    def value_name(self) -> str:
+        return f"P({'next hand ' if self.hands else ''}{self.target.name}>={self.k})"
+
+    def describe(self) -> str:
+        where = "the hand drawn after Clean-up" if self.hands else "hand + in play at the end of this turn"
+        return (f"1 if at least {self.k} {self.target.describe()} are in {where}, else 0: the expected value is the "
+                "probability. Unknown cards ('?') never match, so the value is a lower bound when they can appear.")
+
+    def utility(self, metrics: dict[str, Any]) -> float:
+        if self.hands:
+            n = (metrics.get("hand_target_counts") or [0])[0]
+        else:
+            n = metrics["target_count"]
+        return 1.0 if n >= self.k else 0.0
+
+
 def value_is_lower_bound(objective: Objective, metrics: dict[str, Any]) -> bool:
     """True when a leaf's objective value only bounds the true value from below.
 
     Coins, ``threshold:<T>``, next-hand and future coins never decrease when an unknown card turns
     out to be known (Treasures add coins, Actions may be left unplayed), so counting unknown
-    cards as $0 gives a lower bound. Heuristic objectives are never labelled bounds.
+    cards as $0 gives a lower bound; likewise ``target:`` counts unknown cards as non-matching.
+    Heuristic objectives are never labelled bounds.
     """
     if objective.provenance == "heuristic":
         return False
-    if isinstance(objective, NextHandMoneyObjective):
+    if isinstance(objective, NextHandMoneyObjective) or (isinstance(objective, TargetObjective) and objective.hands):
         return metrics["coins_is_lower_bound"] or metrics.get("next_hand_coins_is_lower_bound", False)
     if isinstance(objective, FutureMoneyObjective):
         return metrics["coins_is_lower_bound"] or metrics.get("future_coins_is_lower_bound", False)
@@ -293,5 +341,20 @@ def get_objective(name: str, state: GameState | None = None, engine: DominionRul
         if raw.isdigit() and int(raw) >= 1:
             return ThresholdObjective(int(raw))
         raise ValueError(f"Bad threshold objective {name!r}: expected threshold:<T> with an integer T >= 1 (e.g. threshold:6).")
+    if key.startswith("target:"):
+        return _target_objective(name, engine)
     raise ValueError(f"Unknown objective {name!r}; choose one of: {', '.join(OBJECTIVE_NAMES)} (e.g. threshold:6).")
 
+
+def _target_objective(name: str, engine: DominionRuleEngine | None) -> TargetObjective:
+    """``target:<card or type>>=<K>`` or ``target:<card or type>`` (K = 1); targets as ``parse_target``."""
+    text, sep, k = name.strip().split(":", 1)[1].partition(">=")
+    usage = ("expected target:<card or type>>=<K> with an integer K >= 1, or target:<card or type> "
+             "(e.g. target:Treasure>=3, target:Gold)")
+    if sep and not (k.strip().isdigit() and int(k) >= 1):
+        raise ValueError(f"Bad target objective {name!r}: {usage}.")
+    try:
+        target = parse_target(text, engine.registry if engine else load_registry())
+    except ValueError as e:
+        raise ValueError(f"Bad target objective {name!r}: {e}") from None
+    return TargetObjective(target, int(k) if sep else 1)

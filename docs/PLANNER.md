@@ -1,4 +1,4 @@
-# Lookahead planner (Phase 2)
+# Lookahead planner
 
 *Reference for `cardgame dominion plan` / `compare`. Back to the [README](../README.md).*
 
@@ -42,6 +42,7 @@ reported in the output. The **information level** of the draw pile is one of:
 | `next_hand_money` | E[coins in the hand drawn after Clean-up] (needs horizon `next_hand` or `hands:N`) | exact |
 | `future_money` | E[total Treasure coins over the N projected hands] (horizon `hands:N`) | exact (Monte Carlo over budget; `?` = $0, lower bound) |
 | `purchase` | heuristic value of the cards bought (V1 policy weights) | heuristic score, not coins or a probability |
+| `target:T>=K` (`target:T` = K 1) | P(at least K cards of card/type T in hand + in play at the end of this turn; with `next_hand`/`hands:N`: in the first projected hand) | exact probability; `?` never matches (lower bound); does **not** judge which card you buy |
 
 Every value carries a provenance label: `exact` (no randomness), `expected` (probability-weighted
 over an exact enumeration), `monte_carlo` (sampled estimate, shown `± stderr`), `heuristic`,
@@ -55,6 +56,20 @@ conclusive**.
 also projects your next N start-of-turn hands with **no decisions in future turns**: each projected
 hand goes to the discard pile at its Clean-up and the next one is drawn, reshuffling by the rules.
 Per projected hand the output reports E[$] and P(hand >= $5).
+
+**Target objective.** `T` is a card ("Gold") or a type (Treasure, Action, Victory, Curse, Attack,
+Reaction), parsed by the same `parse_target` as `cardgame dominion analyze` / `session draws`, and the
+planner's chance nodes use the same draw engine (`enumerate_draws`) as those analysis commands, so the
+numbers agree. With `hands:N` every projected hand also reports P(>= K target) (exact when the projection
+is). Quote it in the shell (`>=`). Real output, trimmed (Village + Smithy draw 4 of {Copper 2, Silver,
+Estate 2}, Smithy alone 3: 7/10):
+
+```text
+$ cardgame dominion plan -e small_deck_village_smithy --objective 'target:Treasure>=4'
+>> RECOMMENDED: Play Village    P(Treasure>=4) = 1.00 [expected; search exact]
+   2. Play Smithy                                  P(Treasure>=4) = 0.70            [expected; search exact]
+   3. End Action phase (go to Buy phase)           P(Treasure>=4) = 0.00            [exact; search exact]
+```
 
 **Ties.** When the best and second-best candidates have equal value under the objective (|delta| <= 1e-9),
 the result says so (`tie: true`, `tied_actions`, `>> TIE ...`) instead of presenting an arbitrary winner:

@@ -101,19 +101,25 @@ def _outcome(plan: _Plan, drawn: Counter, p: Fraction | None) -> DrawOutcome:
     )
 
 
+def grouped_draws(counts: tuple[int, ...], m: int) -> Iterator[tuple[tuple[int, ...], int]]:
+    """Every multiset of ``m`` cards from a pile holding ``counts[i]`` cards of kind ``i``: ``(k_0, k_1, ...)``
+    with its weight prod C(n_i, k_i) (the number of m-card subsets that give it)."""
+    if not counts:
+        if m == 0:
+            yield (), 1
+        return
+    n, tail = counts[0], counts[1:]
+    tail_size = sum(tail)
+    for k in range(max(0, m - tail_size), min(n, m) + 1):
+        ways = comb(n, k)
+        for rest, w in grouped_draws(tail, m - k):
+            yield (k,) + rest, w * ways
+
+
 def _multisets(items: list[tuple[str, int]], m: int) -> Iterator[tuple[Counter, int]]:
     """Every multiset of size ``m`` drawable from ``items``, with its weight prod C(n_i, k_i)."""
-    if not items:
-        if m == 0:
-            yield Counter(), 1
-        return
-    (card, n), tail = items[0], items[1:]
-    tail_size = sum(c for _, c in tail)
-    for k in range(max(0, m - tail_size), min(n, m) + 1):
-        for rest, w in _multisets(tail, m - k):
-            if k:
-                rest = rest + Counter({card: k})
-            yield rest, w * comb(n, k)
+    for ks, w in grouped_draws(tuple(n for _, n in items), m):
+        yield Counter({card: k for (card, _), k in zip(items, ks) if k}), w
 
 
 def enumerate_draws(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int) -> list[DrawOutcome]:
@@ -132,6 +138,23 @@ def count_draw_outcomes(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: i
     for _, cap in _pool(plan.pile):
         ways = [sum(ways[j - k] for k in range(min(cap, j) + 1)) for j in range(plan.m + 1)]
     return ways[plan.m]
+
+
+def draw_unidentified(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int, seen: Counter) -> DrawOutcome:
+    """Drawing ``n`` cards when "?" cards may be among them, so which cards left the pile is not known.
+
+    ``seen`` holds the identities the drawn cards may have. The fixed part (``top`` prefix, the whole pile
+    before a reshuffle) is drawn exactly as in ``enumerate_draws``; of the random part's pool only
+    ``max(0, known_c - seen_c)`` of each card ``c`` is certainly left, the rest becomes "?" (same size).
+    ``cards`` is the fixed part plus "?" per random card; ``p_exact`` is None (no likelihood is implied).
+    """
+    plan = _plan(draw, discard, n)
+    pile = plan.pile
+    if plan.m:
+        left = pile.rest_counter - (seen - Counter(plan.fixed))
+        pile = DrawPileKnowledge((), left, pile.size - plan.m - sum(left.values()), True, pile.source)
+    return DrawOutcome(tuple(sorted(plan.fixed + (UNKNOWN_CARD,) * plan.m)), pile, plan.discard, None,
+                       plan.reshuffled, plan.exhausted, plan.boundary, plan.owed)
 
 
 def sample_draw(draw: DrawPileKnowledge, discard: DiscardKnowledge, n: int, rng: random.Random) -> DrawOutcome:

@@ -32,3 +32,6 @@ htmlcov/
 # Local runtime output (interactive snapshots, session files)
 game.json
 *.session.json
+
+# Personal scratch files
+g.json

@@ -43,10 +43,12 @@ from ..inference import (
     to_game_state,
 )
 from ..inference.belief import ENUMERATION_LIMIT, outcome_count, predictive
+from ..inference.analysis import NOT_DETERMINABLE_NOTE, DeckAnalysis, DrawAnalysis, GuaranteedCards, analyze_deck, analyze_draw, \
+    get_guaranteed_cards
 from ..inference.session import HandPrediction
 from ..rules.zones import UNKNOWN_CARD
 from ..rules import DominionRuleEngine
-from .commands import EXIT_INVALID, EXIT_OK, EXIT_USAGE, _plan_config, _run, add_planner_flags
+from .commands import EXIT_INVALID, EXIT_OK, EXIT_USAGE, _plan_config, _run, add_at_flag, add_planner_flags
 from .parsing import parse_card_list, parse_pile_overrides
 from .render import RULE, fmt_cards, render_plan
 
@@ -281,6 +283,98 @@ def render_prediction(pred: HandPrediction) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------- deck / draw analysis
+
+AT_LABEL = {"now": "drawn from the current piles", "next_turn": "next turn, after this turn's Clean-up"}
+
+
+def fmt_range(lo: Fraction | float, hi: Fraction | float) -> str:
+    """One value when the bounds agree, else ``[lower, upper]``."""
+    return fmt_p(lo) if lo == hi else f"[{fmt_p(lo)}, {fmt_p(hi)}]"
+
+
+def _draw_head(what: str, n: int, at: str, turn: int | None, method: str, worlds: int) -> str:
+    return (f"{what} in the next {n} card(s) - {AT_LABEL[at]} (turn {turn if turn is not None else '?'}), "
+            f"method {method}, hidden states {worlds}")
+
+
+def render_draw_analysis(a: DrawAnalysis) -> list[str]:
+    c, name = a.counts, a.target.name
+    lines = [_draw_head(f"{name}{' (type)' if a.target.kind == 'type' else ''}", a.draw_count, a.at, a.turn,
+                        a.method, a.worlds)]
+    if not a.determinable:
+        lines.append(f"Not determinable: the draws reach a pile of unknown size. Bounds only: at least {a.min}, "
+                     f"at most {a.max} {name}.")
+        return lines + [f"Note: {n}" for n in a.notes if n != NOT_DETERMINABLE_NOTE]
+    if a.deterministic:
+        lines.append(f"Known exactly: {a.min} {name} (deduced, probability 1)")
+    else:
+        lines.append(f"Guaranteed range: at least {a.min}, at most {a.max} {name}"
+                     + (" (the maximum counts '?' cards as matches)" if a.bounded else ""))
+        lines.append("  k    P(X = k)" + ("  [lower, upper]" if a.bounded else ""))
+        for k in range(a.draw_count + 1):
+            lo, hi = c.range_exactly(k) if a.bounded else (c.p_exactly(k),) * 2  # type: ignore[misc]
+            if hi:
+                lines.append(f"  {k:<4} {fmt_range(lo, hi)}")
+    if a.bounded:
+        p0 = (1 - c.upper_p_at_least(1), c.p_zero())  # type: ignore[operator]
+        lines.append(f"P(none): {fmt_range(*p0)}    P(at least 1): {fmt_range(*c.range_at_least(1))}    "  # type: ignore
+                     f"E[count]: {fmt_range(c.expected, c.upper_expected)}")  # type: ignore[arg-type]
+    elif not a.deterministic:
+        lines.append(f"P(none): {fmt_p(c.p_zero())}    P(at least 1): {fmt_p(c.p_at_least(1))}    "  # type: ignore
+                     f"E[count]: {fmt_p(c.expected)}")  # type: ignore[arg-type]
+    lines.append(f"P(reshuffle while drawing): {fmt_p(c.p_reshuffle)}    "
+                 f"P(fewer than {a.draw_count} cards drawn): {fmt_p(c.p_short)}")
+    return lines + [f"Note: {n}" for n in a.notes]
+
+
+def render_guaranteed(g: GuaranteedCards) -> list[str]:
+    lines = [_draw_head("Cards", g.draw_count, g.at, g.turn, g.method, g.worlds)]
+    if not g.determinable:
+        lines.append("Not determinable: the draws reach a pile of unknown size (the ranges below are bounds only).")
+    lines.append("Guaranteed: " + (", ".join(b.describe() for b in g.guarantees) or "nothing"))
+    lines.append(f"  {'Card / type':<20} min  max")
+    for b in g.cards + g.types:
+        label = b.target.name + (" (type)" if b.target.kind == "type" else "")
+        lines.append(f"  {label:<20} {b.min:>3}  {b.max:>3}")
+    if g.impossible:
+        lines.append(f"Impossible (owned, cannot be drawn): {', '.join(g.impossible)}")
+    if g.determinable:
+        lines.append(f"P(reshuffle while drawing): {fmt_p(g.p_reshuffle)}    "  # type: ignore[arg-type]
+                     f"P(fewer than {g.draw_count} cards drawn): {fmt_p(g.p_short)}")  # type: ignore[arg-type]
+    return lines + [f"Note: {n}" for n in g.notes]
+
+
+def render_deck(d: DeckAnalysis) -> list[str]:
+    lines = [f"Deck analysis - turn {d.turn if d.turn is not None else '?'}, phase {d.phase.upper()}, "
+             f"hidden states {d.worlds}, draw pile information {d.information_level}"
+             + (f", pending draws {d.pending_draws}" if d.pending_draws else "")]
+    labels = {"draw_pile": "Draw pile", "discard_pile": "Discard", "hand": "Hand", "in_play": "In play",
+              "owned": "Owned", "trash": "Trash"}
+    for z in d.zones:
+        if z.size is None and z.unknown is None:
+            lines.append(f"{labels[z.zone]} ({z.status}): size unknown")
+            continue
+        size = "size varies" if z.size is None else f"{z.size} card{'s' if z.size != 1 else ''}"
+        extra = f", {z.unknown} unknown ('?')" if z.unknown else ""
+        extra += f", top first: {', '.join(z.top)}" if z.top else ""
+        lines.append(f"{labels[z.zone]} ({z.status}, {size}{extra}):" + ("" if z.cards or z.types else " (empty)"))
+        for c in z.cards + z.types:
+            label = c.name + (" (type)" if c.kind == "type" else "")
+            if c.certain is not None:
+                lines.append(f"  {label:<18} {c.certain:<7} {c.status}")
+                continue
+            text = f"  {label:<18} {f'{c.min}-{c.max}':<7} {c.status}, E[known] {fmt_p(c.expected)}"
+            if c.distribution:
+                text += "; P(count): " + ", ".join(f"{k}: {fmt_p(p)}" for k, p in c.distribution)
+            lines.append(text)
+    if d.flags:
+        lines += ["Incomplete history (not contradictions):"] + [f"  - {f}" for f in d.flags]
+    lines.append("Exact counts are deductions; 'probabilistic' = varies between hidden states (exact mixture); "
+                 "'unknown' = '?' cards could be it (min-max bounds).")
+    return lines
+
+
 # ---------------------------------------------------------------- events from arguments
 
 def _cards(words: list[str], registry) -> list[str]:
@@ -461,7 +555,25 @@ def _history(ctx: _Ctx, session: Session) -> int:
     return EXIT_OK
 
 
-HANDLERS = {"undo": _undo, "correct": _correct, "reset": _reset, "show": _show, "predict": _predict,
+def _deck(ctx: _Ctx, session: Session) -> int:
+    d = analyze_deck(session)
+    ctx.emit(d.to_dict(), render_deck(d))
+    return EXIT_OK
+
+
+def _draws(ctx: _Ctx, session: Session) -> int:
+    a = analyze_draw(session, ctx.args.count, ctx.args.target, ctx.args.at)
+    ctx.emit(a.to_dict(), render_draw_analysis(a))
+    return EXIT_OK
+
+
+def _guaranteed(ctx: _Ctx, session: Session) -> int:
+    g = get_guaranteed_cards(session, ctx.args.count, ctx.args.at)
+    ctx.emit(g.to_dict(), render_guaranteed(g))
+    return EXIT_OK
+
+
+HANDLERS = {"deck": _deck, "draws": _draws, "guaranteed": _guaranteed, "undo": _undo, "correct": _correct, "reset": _reset, "show": _show, "predict": _predict,
             "plan": _plan, "history": _history}
 
 
@@ -543,6 +655,14 @@ def add_verbs(sub, with_file: bool) -> None:
     verb("predict", "Distribution of the next hand (exact where feasible)").add_argument(
         "--top", type=int, default=10, help="How many hands to list (default 10)")
     add_planner_flags(verb("plan", "Run the lookahead planner on the tracked state"))
+    verb("deck", "Every zone per card and type: deduced counts vs probabilities vs unknown ('?')")
+    dr = verb("draws", "Exact P(k copies of a card or type) in the next N draws, e.g. --count 5 --target Treasure")
+    dr.add_argument("--count", type=int, required=True, help="Number of cards drawn (continuous, no Clean-up)")
+    dr.add_argument("--target", required=True, help="A card name or a type (Treasure, Action, Victory, ...)")
+    add_at_flag(dr)
+    gu = verb("guaranteed", "Cards and types guaranteed (min) or impossible in the next N draws")
+    gu.add_argument("--count", type=int, help="Number of cards drawn (default: the hand size)")
+    add_at_flag(gu)
     verb("history", "List recorded events")
     verb("undo", "Remove the last event")
     c = verb("correct", 'Replace event INDEX and replay, e.g. correct 3 buy Silver  (or "buy Silver")')
@@ -587,6 +707,7 @@ REPL_HELP = """Verbs (same as `cardgame dominion session <verb> FILE`, without F
   buy Silver                 gain Silver [--to deck]          trash Copper [--from hand]
   discard 2 Estate           supply Province=6                end-turn
   show   predict [--top K]   plan [--horizon hands:2 --objective future_money ...]
+  deck   draws --count N --target T [--at now|next-turn]   guaranteed [--count N] [--at ...]
   history   undo   correct INDEX <verb> [args]   reset   help [VERB]   quit
 Add --json for machine-readable output. The file is saved after each successful change."""
 
